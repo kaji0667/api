@@ -1,0 +1,5 @@
+# Replace this hostname with one whose DNS points to YOUR public GPU server.
+# Keep server.py on 127.0.0.1:9001; open public TCP 80/443 for Caddy only.
+api.team.example.com {
+    reverse_proxy 127.0.0.1:9001
+}

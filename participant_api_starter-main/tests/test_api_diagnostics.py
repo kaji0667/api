@@ -1,0 +1,167 @@
+"""Private diagnostic persistence, actual executor tracking and fail-open checks."""
+
+import io
+import json
+import os
+import stat
+import sys
+import tempfile
+import threading
+import unittest
+from contextlib import redirect_stderr
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from hfsa_adapter import AdapterFailure, HFSAAdapter, _append_prediction_diagnostic
+
+
+class PersistentDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.log = Path(self.directory.name) / "private" / "predictions.jsonl"
+        self.environment = patch.dict(os.environ, {
+            "HFSA_API_DIAGNOSTIC_FILE": str(self.log), "HFSA_API_REPLAY_DIR": "",
+        })
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        self.router_patch = patch("hfsa_adapter.route_question", return_value={"task": "counting"})
+        self.route = self.router_patch.start()
+        self.addCleanup(self.router_patch.stop)
+        self.counting = Mock()
+        self.counting.predict.return_value = SimpleNamespace(count=3)
+        self.classification = Mock(class_names=["bridge"])
+        self.classification.predict.return_value = {
+            "predictions": [{"class_name": "bridge", "probability": 1.0}],
+        }
+        self.detection = Mock()
+        self.detection.predict.return_value = SimpleNamespace(detection_count=2)
+        self.vqa = Mock()
+        self.vqa.predict.return_value = {
+            "status": "ok", "answer": "private-model-answer", "question_type": "category",
+        }
+        self.change = Mock()
+        self.change.predict.return_value = SimpleNamespace(
+            supported=True, answer="private-change-answer",
+        )
+        self.adapter = HFSAAdapter(self.classification, self.detection, self.counting,
+                                   None, vqa=self.vqa, change=self.change)
+        self.output = io.StringIO()
+
+    def predict(self, task="counting", kind="integer", **extra):
+        self.route.return_value = {"task": task}
+        request = {
+            "question": "private-question-text", "response_constraint": {"type": kind},
+            "item_id": "SYNTHETIC_ITEM", "request_id": "synthetic:run:1",
+            "choices": {"private-choice": "private-choice-text"},
+            "headers": {"Authorization": "private-bearer-token"},
+            "api_key": "private-api-key", "answer": "private-gold-answer", **extra,
+        }
+        images = [Path("/private/image-path")] * (2 if task == "change" else 1)
+        with redirect_stderr(self.output):
+            return self.adapter.predict(request, images)
+
+    def rows(self):
+        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+
+    def test_append_records_match_stderr_and_exclude_content(self):
+        self.assertEqual(self.predict(), "3")
+        self.assertEqual(self.predict("vqa", "short_text"), "private-model-answer")
+        self.assertEqual(self.predict("change", "short_text"), "private-change-answer")
+        rows = self.rows()
+        self.assertEqual(rows, [json.loads(line) for line in self.output.getvalue().splitlines()])
+        self.assertEqual([row["executor"] for row in rows], ["counting", "vqa", "change"])
+        for row in rows:
+            self.assertEqual(row["status"], "succeeded")
+            self.assertIsNone(row["reason"])
+            self.assertGreaterEqual(row["elapsed_ms"], 0)
+            self.assertGreater(row["process_id"], 0)
+            self.assertRegex(row["timestamp_utc"], r"\d{4}-\d{2}-\d{2}T.*\+00:00$")
+        self.assertNotIn("private-", self.log.read_text(encoding="utf-8"))
+        self.assertNotIn("answer", rows[0])
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(self.log.stat().st_mode), 0o600)
+
+    def test_classification_and_presence_record_actual_predictors(self):
+        self.assertEqual(self.predict("classification", "short_text"), "bridge")
+        self.predict("presence", "short_text")
+        self.assertEqual([row["executor"] for row in self.rows()], ["classification", "detection"])
+
+    def test_known_rejection_records_executor_and_fixed_code(self):
+        self.vqa.predict.return_value = {"status": "unsupported", "reason": "unsupported_task"}
+        with self.assertRaises(AdapterFailure) as raised:
+            self.predict("vqa", "short_text")
+        self.assertEqual(raised.exception.code, "vqa_unsupported_task")
+        row = self.rows()[0]
+        self.assertEqual((row["task"], row["executor"], row["status"], row["reason"]),
+                         ("vqa", "vqa", "failed", "vqa_unsupported_task"))
+
+    def test_before_model_rejection_does_not_claim_executor(self):
+        self.adapter.change = None
+        with self.assertRaises(AdapterFailure):
+            self.predict("change", "short_text")
+        row = self.rows()[0]
+        self.assertEqual(row["task"], "change")
+        self.assertIsNone(row["executor"])
+        self.assertEqual(row["reason"], "change_not_configured")
+        self.change.predict.assert_not_called()
+
+    def test_unknown_code_and_exception_class_cannot_leak_arbitrary_text(self):
+        self.counting.predict.side_effect = AdapterFailure("private-code-token", "private-message")
+        with self.assertRaises(AdapterFailure):
+            self.predict()
+        unsafe_class = type("private_class_token", (RuntimeError,), {})
+        self.counting.predict.side_effect = unsafe_class("private-exception-key")
+        with self.assertRaises(RuntimeError):
+            self.predict()
+        rows = self.rows()
+        self.assertEqual([row["reason"] for row in rows], ["unexpected_exception"] * 2)
+        self.assertEqual(rows[1]["error_type"], "Exception")
+        self.assertNotIn("private", self.log.read_text(encoding="utf-8"))
+
+    def test_invalid_file_destination_does_not_change_answer_or_rejection(self):
+        self.log.parent.mkdir()
+        self.log.mkdir()
+        self.assertEqual(self.predict(), "3")
+        self.counting.predict.side_effect = AdapterFailure("count_option_unmatched", "private-message")
+        with self.assertRaises(AdapterFailure) as raised:
+            self.predict()
+        self.assertEqual(raised.exception.code, "count_option_unmatched")
+        self.assertEqual(len(self.output.getvalue().splitlines()), 2)
+        self.assertNotIn(str(self.log), self.output.getvalue())
+
+    def test_unavailable_stderr_does_not_prevent_file_append(self):
+        with patch("hfsa_adapter.print", side_effect=OSError("private-stderr-message")):
+            self.assertEqual(self.predict(), "3")
+        self.assertEqual(self.rows()[0]["status"], "succeeded")
+
+    def test_disabled_persistence_keeps_only_existing_stderr_diagnostic(self):
+        with patch.dict(os.environ, {"HFSA_API_DIAGNOSTIC_FILE": ""}):
+            self.assertEqual(self.predict(), "3")
+        self.assertFalse(self.log.exists())
+        self.assertEqual(json.loads(self.output.getvalue())["status"], "succeeded")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow path check")
+    def test_symlink_destination_is_not_followed(self):
+        self.log.parent.mkdir()
+        target = self.log.parent / "existing-private-file"
+        target.write_text("unchanged", encoding="utf-8")
+        self.log.symlink_to(target)
+        self.assertEqual(self.predict(), "3")
+        self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
+
+    def test_concurrent_rows_remain_separate_json_objects(self):
+        threads = [threading.Thread(target=_append_prediction_diagnostic,
+                                    args=(json.dumps({"synthetic": number}),))
+                   for number in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(row["synthetic"] for row in self.rows()), list(range(8)))
+
+
+if __name__ == "__main__":
+    unittest.main()

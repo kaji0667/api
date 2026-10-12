@@ -1,0 +1,27 @@
+Source model: BLIP-2 (ICML 2023), Salesforce LAVIS
+Paper: https://proceedings.mlr.press/v202/li23q.html
+Official repository: https://github.com/salesforce/LAVIS
+Pinned revision: 05cb670f47296522e24e7727e366b4a997d28582
+Core source: https://raw.githubusercontent.com/salesforce/LAVIS/05cb670f47296522e24e7727e366b4a997d28582/lavis/models/blip2_models/Qformer.py
+Query construction reference: https://raw.githubusercontent.com/salesforce/LAVIS/05cb670f47296522e24e7727e366b4a997d28582/lavis/models/blip2_models/blip2.py
+Visual-query forward reference: https://raw.githubusercontent.com/salesforce/LAVIS/05cb670f47296522e24e7727e366b4a997d28582/lavis/models/blip2_models/blip2_opt.py
+Source license: BSD-3-Clause; underlying Hugging Face code: Apache-2.0
+Imported classes: BertSelfAttention, BertSelfOutput, BertAttention,
+BertIntermediate, BertOutput, BertLayer.
+Only optional BertAttention.prune_heads is removed from the imported classes.
+Dependencies: torch + Python standard library. GELU is supplied through PyTorch;
+FFN chunking is fixed to zero. No transformers or lavis installation is required.
+
+HFSA adaptation: existing frozen YOLO spatial grids are projected to width 192;
+32 learned queries and one projected complete-question CLIP vector share
+self-attention. Query tokens alone cross-attend to visual tokens, every second
+layer, and use the original separate query FFN. Two layers, four heads, FFN width
+768, and hidden/attention dropout 0.1 are used by the default new config.
+A question-conditioned query readout feeds the existing five answer heads.
+
+The question vector is pooled, not a token sequence from BERT. Shared YOLO and
+OpenCLIP remain frozen. No pretrained Q-Former/BERT/OPT/T5 weights or BLIP-2
+pretraining objectives are imported. This is an adapted, freshly trained fusion
+structure, not a complete BLIP-2 checkpoint or its reported zero-shot accuracy.
+The paper's SOTA claim concerns its published 2023 evaluations; this port does
+not claim to be the latest 2026 SOTA or to have reached those benchmark scores.

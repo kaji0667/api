@@ -1,0 +1,13 @@
+__pycache__/
+/.venv/
+/models/
+*.pyc
+.env
+*.key
+*.pem
+manifest.json
+assets/
+*.safetensors
+*.pt
+*.pth
+*.bin

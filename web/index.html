@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="遥感图-文可解释轻量化多任务智能解译系统" />
+    <title>遥感图-文可解释轻量化多任务智能解译系统</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@400..700&family=Instrument+Serif:ital@0;1&family=Inter:wght@300..900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <nav class="navbar" id="top" aria-label="主导航">
+      <a class="brand" href="#top" aria-label="回到首页">
+        <span class="brand-name">
+          <strong>遥感图文智能解译</strong>
+          <small>可解释 · 轻量化 · 多任务</small>
+        </span>
+      </a>
+
+      <div class="nav-right">
+        <a class="nav-pill" href="#tasks-section">开始解译</a>
+      </div>
+    </nav>
+
+    <section class="hero" id="hero">
+      <div class="hero-media" aria-hidden="true">
+        <video class="hero-earth-video is-active" autoplay muted playsinline preload="auto" poster="/earth-rotation-poster.jpg">
+          <source src="/earth-rotation.mp4" type="video/mp4">
+        </video>
+        <video class="hero-earth-video" muted playsinline preload="auto" poster="/earth-rotation-poster.jpg">
+          <source src="/earth-rotation.mp4" type="video/mp4">
+        </video>
+        <div class="hero-stars hero-stars-a"></div>
+        <div class="hero-stars hero-stars-b"></div>
+        <div class="hero-nebula hero-nebula-a"></div>
+        <div class="hero-nebula hero-nebula-b"></div>
+        <div class="earth-scene" hidden>
+          <div class="orbit-plane orbit-back">
+            <span class="orbit-line"></span>
+            <span class="orbit-runner">
+              <span class="sat-counter">
+                <span class="sat-flat sat-flat-back"><i class="sat-craft"></i></span>
+              </span>
+            </span>
+          </div>
+          <div class="earth-globe">
+            <span class="earth-texture"></span>
+          </div>
+          <span class="earth-atmosphere"></span>
+          <svg class="earth-svg" viewBox="0 0 600 600" focusable="false">
+            <defs>
+              <radialGradient id="oceanGrad" cx="36%" cy="30%" r="80%">
+                <stop offset="0%" stop-color="#8FE0FF"/>
+                <stop offset="26%" stop-color="#3FA6EC"/>
+                <stop offset="58%" stop-color="#1B63B4"/>
+                <stop offset="84%" stop-color="#0C3068"/>
+                <stop offset="100%" stop-color="#081F46"/>
+              </radialGradient>
+              <linearGradient id="landGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#8FE3B0"/>
+                <stop offset="55%" stop-color="#3E9B6E"/>
+                <stop offset="100%" stop-color="#1F6B4A"/>
+              </linearGradient>
+              <linearGradient id="nightGrad" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="rgba(3,8,22,0)"/>
+                <stop offset="55%" stop-color="rgba(3,8,22,0)"/>
+                <stop offset="78%" stop-color="rgba(3,8,22,0.5)"/>
+                <stop offset="100%" stop-color="rgba(3,8,22,0.82)"/>
+              </linearGradient>
+              <radialGradient id="limbShade" cx="38%" cy="32%" r="80%">
+                <stop offset="0%" stop-color="rgba(2,8,24,0)"/>
+                <stop offset="70%" stop-color="rgba(2,8,24,0)"/>
+                <stop offset="92%" stop-color="rgba(2,8,24,0.42)"/>
+                <stop offset="100%" stop-color="rgba(2,8,24,0.72)"/>
+              </radialGradient>
+              <clipPath id="earthClip"><circle cx="300" cy="300" r="238"/></clipPath>
+              <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+                <feGaussianBlur stdDeviation="7" result="blur"/>
+                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+              <filter id="cloudBlur"><feGaussianBlur stdDeviation="6"/></filter>
+              <g id="landmass" fill="url(#landGrad)">
+                <path d="M118 214 C156 168 238 160 288 192 C336 222 344 276 306 308 C266 342 198 348 158 316 C118 286 86 252 118 214 Z"/>
+                <path d="M392 148 C418 128 466 134 482 162 C497 190 472 214 438 209 C404 204 368 170 392 148 Z"/>
+                <path d="M214 380 C246 362 300 368 314 398 C327 428 296 452 258 446 C222 440 186 400 214 380 Z"/>
+                <path d="M520 316 C558 292 620 300 642 340 C662 378 628 412 582 408 C536 404 490 348 520 316 Z"/>
+                <path d="M702 176 C762 146 852 156 882 202 C908 241 862 278 800 272 C740 266 658 210 702 176 Z"/>
+                <path d="M948 300 C980 280 1032 288 1044 318 C1056 350 1020 370 984 362 C948 354 922 322 948 300 Z"/>
+                <path d="M836 416 C866 400 912 408 920 436 C928 464 892 482 856 472 C824 464 808 434 836 416 Z"/>
+                <circle cx="356" cy="128" r="9"/>
+                <circle cx="618" cy="170" r="7"/>
+                <circle cx="760" cy="392" r="8"/>
+                <circle cx="1084" cy="212" r="7"/>
+                <circle cx="470" cy="470" r="8"/>
+              </g>
+              <g id="cloudband" fill="#FFFFFF">
+                <ellipse cx="210" cy="188" rx="92" ry="13" opacity="0.2"/>
+                <ellipse cx="430" cy="352" rx="120" ry="15" opacity="0.16"/>
+                <ellipse cx="640" cy="230" rx="96" ry="12" opacity="0.22"/>
+                <ellipse cx="900" cy="140" rx="82" ry="11" opacity="0.18"/>
+                <ellipse cx="980" cy="408" rx="108" ry="14" opacity="0.16"/>
+              </g>
+            </defs>
+
+            <circle cx="300" cy="300" r="254" fill="none" stroke="rgba(84,230,255,0.12)" stroke-width="18" filter="url(#softGlow)"/>
+            <circle cx="300" cy="300" r="244" fill="none" stroke="rgba(120,225,255,0.4)" stroke-width="8" filter="url(#softGlow)"/>
+            <circle cx="300" cy="300" r="238" fill="url(#oceanGrad)"/>
+
+            <g clip-path="url(#earthClip)">
+              <g class="earth-land">
+                <use href="#landmass"/>
+                <use href="#landmass" x="1200"/>
+              </g>
+              <g class="earth-clouds" filter="url(#cloudBlur)">
+                <use href="#cloudband"/>
+                <use href="#cloudband" x="1200"/>
+              </g>
+              <g class="earth-graticule" fill="none" stroke="rgba(255,255,255,0.09)" stroke-width="1">
+                <ellipse cx="300" cy="300" rx="82" ry="238"/>
+                <ellipse cx="300" cy="300" rx="164" ry="238"/>
+                <line x1="300" y1="62" x2="300" y2="538"/>
+                <ellipse cx="300" cy="168" rx="196" ry="26"/>
+                <ellipse cx="300" cy="234" rx="229" ry="30"/>
+                <ellipse cx="300" cy="300" rx="238" ry="34"/>
+                <ellipse cx="300" cy="366" rx="229" ry="30"/>
+                <ellipse cx="300" cy="432" rx="196" ry="26"/>
+              </g>
+              <rect x="62" y="62" width="476" height="476" fill="url(#nightGrad)"/>
+              <rect x="62" y="62" width="476" height="476" fill="url(#limbShade)"/>
+              <g class="city-lights" fill="#FFD98A">
+                <circle class="city-light" cx="452" cy="236" r="1.7"/>
+                <circle class="city-light" cx="482" cy="286" r="1.4"/>
+                <circle class="city-light" cx="466" cy="352" r="1.8"/>
+                <circle class="city-light" cx="508" cy="318" r="1.3"/>
+                <circle class="city-light" cx="430" cy="398" r="1.5"/>
+                <circle class="city-light" cx="512" cy="392" r="1.2"/>
+              </g>
+            </g>
+
+            <circle cx="300" cy="300" r="238" fill="none" stroke="rgba(140,235,255,0.55)" stroke-width="1.6"/>
+          </svg>
+          <span class="ground-ping ground-ping-a"></span>
+          <span class="ground-ping ground-ping-b"></span>
+          <div class="orbit-plane orbit-front">
+            <span class="orbit-line"></span>
+            <span class="orbit-runner">
+              <span class="sat-counter">
+                <span class="sat-flat sat-flat-front"><i class="sat-craft"></i></span>
+              </span>
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="hero-overlay" aria-hidden="true"></div>
+
+      <div class="hero-content">
+        <div class="hero-badge reveal">
+          <span class="badge-dot"></span>
+          <span>自然语言驱动 · 遥感多任务智能解译</span>
+        </div>
+        <h1 class="hero-title reveal">
+          让卫星影像
+          <br />
+          <em class="gradient-text">听懂自然语言</em>
+        </h1>
+        <p class="hero-sub reveal">
+          仅凭一句自然语言指令，即可完成场景分类、目标检测、目标计数与语义分割。
+          本系统面向星载受限算力，提供图文多模态智能解译能力。
+        </p>
+        <div class="hero-actions reveal">
+          <button class="btn-primary button-glow" type="button" id="hero-cta">
+            <span>开始解译</span>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <a class="btn-ghost" href="#about-section">了解赛题背景</a>
+        </div>
+      </div>
+
+    </section>
+
+    <section class="quote-section" id="quote-section" aria-label="赛题引言">
+      <canvas class="aero-shards-canvas" id="aero-shards-canvas" aria-hidden="true"></canvas>
+      <div class="parallax-layer px-nebula px-left" id="px-left" aria-hidden="true"></div>
+      <div class="parallax-layer px-nebula px-right" id="px-right" aria-hidden="true"></div>
+      <div class="quote-content">
+        <div class="quote-copy">
+          <p class="quote-text reveal">
+            天数天算，<br />地数天算。
+          </p>
+          <p class="quote-sub reveal">
+            一句自然语言指令，让遥感影像不再是沉默的像素，而是可以直接追问的答案。
+          </p>
+        </div>
+        <div class="quote-satellite reveal" aria-hidden="true">
+          <img src="/satellite-realistic.png" alt="" />
+        </div>
+      </div>
+    </section>
+
+    <main class="page-shell">
+      <section class="tasks-section" id="tasks-section" aria-labelledby="task-heading">
+        <canvas class="ghost-fibers-canvas" id="ghost-fibers-canvas" aria-hidden="true"></canvas>
+        <div class="section-header reveal">
+          <div class="section-chip-row">
+            <span class="section-chip">CAPABILITIES</span>
+            <span class="section-line"></span>
+          </div>
+          <h2 id="task-heading">核心解译任务</h2>
+        </div>
+        <div class="task-grid" id="task-grid" aria-live="polite">
+          <div class="loading-card">正在读取任务配置…</div>
+        </div>
+      </section>
+
+      <section class="workspace" id="workspace" aria-labelledby="workspace-heading" hidden>
+        <canvas class="cursor-grid-canvas" id="cursor-grid-canvas" aria-hidden="true"></canvas>
+        <div class="workspace-header">
+          <div class="workspace-title-group">
+            <span class="section-chip">CONSOLE</span>
+            <h2 id="workspace-heading">解译工作区</h2>
+          </div>
+          <div class="selected-task-badge" id="selected-task-badge">请先选择任务</div>
+        </div>
+
+        <div class="workspace-grid">
+          <section class="input-panel panel liquid-glass">
+            <div class="panel-heading">
+              <div class="panel-heading-left">
+                <span class="panel-letter">A</span>
+                <h3>输入内容</h3>
+              </div>
+              <small id="input-summary">图像</small>
+            </div>
+
+            <label class="upload-zone" id="upload-zone" for="image-input">
+              <input id="image-input" type="file" accept="image/jpeg,image/png,image/webp,image/tiff" />
+              <div class="upload-empty" id="upload-empty">
+                <div class="upload-icon" aria-hidden="true">
+                  <svg width="30" height="30" viewBox="0 0 32 32" fill="none">
+                    <rect x="4" y="6" width="24" height="20" rx="3" stroke="currentColor" stroke-width="1.5"/>
+                    <path d="M4 20l6-6 5 5 4-4 9 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    <circle cx="12" cy="12" r="1.6" fill="currentColor"/>
+                  </svg>
+                </div>
+                <strong>拖放遥感图像到这里</strong>
+                <p>或点击选择本地文件</p>
+                <small>JPG · PNG · WEBP · TIFF</small>
+              </div>
+              <div class="image-preview-wrap" id="image-preview-wrap" hidden>
+                <img id="image-preview" alt="已上传的遥感图像预览" />
+                <div class="image-meta">
+                  <strong id="image-name"></strong>
+                  <span id="image-size"></span>
+                </div>
+                <button class="replace-image" type="button" id="replace-image" aria-label="更换图像">更换</button>
+              </div>
+            </label>
+
+            <div class="dynamic-fields" id="dynamic-fields"></div>
+
+            <button class="btn-action" id="run-button" type="button" disabled>
+              <span class="btn-action-text" id="run-label">选择任务后开始</span>
+              <span class="btn-action-arrow" aria-hidden="true">
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                  <path d="M4 9h10M10 5l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </button>
+            <p class="form-message" id="form-message" role="status"></p>
+          </section>
+
+          <section class="result-panel panel liquid-glass">
+            <div class="panel-heading">
+              <div class="panel-heading-left">
+                <span class="panel-letter">B</span>
+                <h3 id="result-heading">分析结果</h3>
+              </div>
+              <small class="pending-chip" id="interface-status-chip">接口待接入</small>
+            </div>
+            <div class="result-stage" id="result-stage">
+              <div class="result-placeholder">
+                <div class="placeholder-orbit" aria-hidden="true">
+                  <span class="orbit-ring"></span>
+                  <span class="orbit-dot"></span>
+                  <span class="orbit-center"></span>
+                </div>
+                <strong>结果将在这里呈现</strong>
+                <p id="result-help">选择任务并上传图像，查看对应的输出形式。</p>
+              </div>
+            </div>
+            <div class="output-tags" id="output-tags"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="about-section" id="about-section" aria-labelledby="about-heading">
+        <canvas class="cursor-grid-canvas" id="about-cursor-grid-canvas" aria-hidden="true"></canvas>
+        <div class="section-header reveal">
+          <div class="section-chip-row">
+            <span class="section-chip">MISSION</span>
+            <span class="section-line"></span>
+          </div>
+          <h2 id="about-heading">赛题背景</h2>
+          <p>面向太空智算的多模态遥感大模型应用探索 · 钱学森空间技术实验室榜单</p>
+        </div>
+        <div class="about-grid">
+          <article class="about-card liquid-glass reveal">
+            <span class="about-index">01</span>
+            <h3>太空智算</h3>
+            <p>将高性能 AI 算力部署到太空，实现“天数天算、地数天算”。卫星在轨直接处理遥感数据，摆脱星地带宽瓶颈，为应急救灾、国防安全、生态监测提供高时效信息服务。</p>
+          </article>
+          <article class="about-card liquid-glass reveal">
+            <span class="about-index">02</span>
+            <h3>自然语言解译</h3>
+            <p>多模态大模型让遥感解译从“能看会说”走向“深度理解”：一句“找到所有红色的油罐车”，即可获得像素级分割、语义级场景理解与目标级检测结果。</p>
+          </article>
+          <article class="about-card liquid-glass reveal">
+            <span class="about-index">03</span>
+            <h3>轻量化星载适配</h3>
+            <p>星载平台算力、功耗与存储受限。系统采用轻量化架构与文本引导的任务路由，在保持解译精度的同时控制模型规模与推理开销，面向受限算力部署。</p>
+          </article>
+        </div>
+      </section>
+
+      <footer class="site-footer">
+        <div class="footer-inner">
+          <span>遥感图-文可解释轻量化多任务智能解译系统</span>
+        </div>
+      </footer>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
