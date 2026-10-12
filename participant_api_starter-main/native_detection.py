@@ -117,6 +117,8 @@ class NativeDetectionResult:
     grounding_index: int | None
     model_prompt: str
     diagnostics: dict[str, Any] | None = None
+    phrase_scores: np.ndarray | None = None
+    extra_phrase_scores: np.ndarray | None = None
 
     @property
     def detection_count(self) -> int:
@@ -258,8 +260,46 @@ class NativeDetection:
         prior = prior * nonempty.to(dtype=prior.dtype)
         return score + self.spatial_weight * prior.unsqueeze(0)
 
+    @staticmethod
+    def _score_boxes_for_input(score_boxes_xyxy: Any, original_hw: tuple[int, int],
+                               ratio_pad: tuple[Any, Any]) -> np.ndarray:
+        """Validate external original-image boxes and apply the real per-axis resize."""
+        try:
+            source = (score_boxes_xyxy.detach().cpu().numpy()
+                      if isinstance(score_boxes_xyxy, torch.Tensor) else np.asarray(score_boxes_xyxy))
+            if source.ndim != 2 or source.shape[1] != 4 or source.dtype.kind not in "iuf":
+                raise ValueError("Expected real numeric boxes shaped [N, 4]")
+            boxes = source.astype(np.float64, copy=True)
+            height, width = original_hw
+            gain_hw, padding_xy = ratio_pad
+            gain_h, gain_w = (float(value) for value in gain_hw)
+            left, top = (float(value) for value in padding_xy)
+        except (TypeError, ValueError, OverflowError, RuntimeError):
+            raise TaskInputError("invalid_detection_geometry", "Invalid external scoring boxes or geometry") from None
+        if (not np.isfinite(boxes).all()
+                or not all(math.isfinite(value) for value in (gain_h, gain_w, left, top))
+                or min(gain_h, gain_w) <= 0 or min(left, top) < 0
+                or (boxes < 0).any() or (boxes > [width, height, width, height]).any()
+                or (boxes[:, 2] <= boxes[:, 0]).any() or (boxes[:, 3] <= boxes[:, 1]).any()):
+            raise TaskInputError("invalid_detection_geometry", "External scoring boxes must have area inside the image")
+        with np.errstate(over="ignore", invalid="ignore"):
+            mapped = boxes * [gain_w, gain_h, gain_w, gain_h] + [left, top, left, top]
+        if not np.isfinite(mapped).all():
+            raise TaskInputError("invalid_detection_geometry", "External scoring coordinates must remain finite")
+        return mapped
+
     def predict(self, image: Image.Image | str | Path | np.ndarray,
-                original_question: str, *, require_grounding: bool = True) -> NativeDetectionResult:
+                original_question: str, *, require_grounding: bool = True,
+                return_phrase_scores: bool = False,
+                score_boxes_xyxy: Any = None) -> NativeDetectionResult:
+        """Optionally return raw phrase scores without changing the detection candidates.
+
+        External boxes are original-image xyxy coordinates. They and the local
+        NMS candidates are scored in this forward's phrase maps, before the
+        optional absolute-position bonus; external boxes never enter assignment.
+        """
+        if type(return_phrase_scores) is not bool:
+            raise TaskInputError("invalid_detection_matching", "return_phrase_scores must be boolean")
         description = sanitize_text(detection_text(original_question), empty_placeholder="")
         # One description is one object-aligned row, not sentence fragments or
         # a fabricated collection of other objects from the unseen test labels.
@@ -270,6 +310,8 @@ class NativeDetection:
         tensor, ratio_pad = self._preprocess(
             original, stride=int(self.backend.stride), image_size=self.image_size_for(original.shape[:2]),
         )
+        extra_input_boxes = (self._score_boxes_for_input(score_boxes_xyxy, original.shape[:2], ratio_pad)
+                             if score_boxes_xyxy is not None else None)
         tensor = tensor.to(self.device)
         vectors = vectors.to(device=self.device, dtype=tensor.dtype).unsqueeze(0)
         mask = torch.ones((1, 1), device=self.device, dtype=torch.bool)
@@ -309,14 +351,28 @@ class NativeDetection:
             if len(boxes):
                 boxes = self._restore_boxes(boxes, original.shape[:2], ratio_pad)
             selected = None
-            if require_grounding and len(detections):
+            phrase_scores = np.empty((0,), dtype=np.float32) if return_phrase_scores else None
+            extra_phrase_scores = np.empty((0,), dtype=np.float32) if extra_input_boxes is not None else None
+            extra_count = len(extra_input_boxes) if extra_input_boxes is not None else 0
+            need_scores = require_grounding or return_phrase_scores or extra_count > 0
+            if need_scores and (len(detections) or extra_count):
+                scoring_boxes = detections[:, :4]
+                if extra_count:
+                    external = torch.as_tensor(extra_input_boxes, device=detections.device, dtype=detections.dtype)
+                    scoring_boxes = torch.cat((scoring_boxes, external), dim=0)
                 score = score_matrix_from_phrase_maps(
                     phrase_logits_levels=self._phrase_maps(self.model), image_index=0,
                     token_indices=torch.zeros((1,), device=detections.device, dtype=torch.long),
-                    candidate_boxes_xyxy=detections[:, :4], input_hw=tuple(tensor.shape[2:]),
+                    candidate_boxes_xyxy=scoring_boxes, input_hw=tuple(tensor.shape[2:]),
                 )
-                if score.shape != (1, len(detections)) or not torch.isfinite(score).all():
+                if score.shape != (1, len(detections) + extra_count) or not torch.isfinite(score).all():
                     raise TaskInputError("invalid_detection_matching", "Invalid description matching scores")
+                if return_phrase_scores:
+                    phrase_scores = score[0, :len(detections)].detach().cpu().numpy().astype(np.float32, copy=True)
+                if extra_count:
+                    extra_phrase_scores = score[0, len(detections):].detach().cpu().numpy().astype(np.float32, copy=True)
+                score = score[:, :len(detections)]
+            if require_grounding and len(detections):
                 score = self._position_adjusted_scores(score, boxes, original.shape[:2], description)
                 rows, columns = assign_by_score_matrix(score, temperature=.7)
                 if rows.numel() != 1 or columns.numel() != 1 or int(rows[0]) != 0:
@@ -329,5 +385,6 @@ class NativeDetection:
             scores=detections[:, 4].detach().cpu().numpy().astype(np.float32, copy=False),
             original_size=tuple(int(x) for x in original.shape[:2]),
             grounding_index=selected, model_prompt=description,
-            diagnostics=diagnostic,
+            diagnostics=diagnostic, phrase_scores=phrase_scores,
+            extra_phrase_scores=extra_phrase_scores,
         )
