@@ -1,5 +1,13 @@
 # 参赛队伍最小模型 API 示例（协议 2.0）
 
+## 2026-10-12 正式权重位于工程内部（当前默认路径）
+
+用户要求 `HFSA-main` 内权重齐全，分类/计数/检测/RefSeg 的正式权重及 YOLOv12m、OpenCLIP 基础权重已按原相对目录复制到工程内，6份文件逐项 SHA-256 与原文件相同。正式 VQA 模型包继续保留在 `runs/vqa/qformer/`，其配置、manifest 与验收文件不修改。
+
+API 和启动脚本默认 `HFSA_MODELS_DIR=HFSA-main` 本身，检测/计数直接加载工程内 `openclip/ViT-L-14.pt`；显式 RefSeg 复用该同版本文本编码器。仍可设置 `HFSA_MODELS_DIR` 使用其他权重根目录。VQA 训练配置和评估/核验脚本的基础权重默认路径同步为 `pretrain_model/yolov12m.pt` 与 `openclip/ViT-L-14.pt`。
+
+如果原 API 终端曾显式 export 外部 `HFSA_MODELS_DIR`，下次启动前执行 `unset HFSA_MODELS_DIR` 即可采用新默认；沿用原 Key 执行 `bash scripts/serve_hfsa_api.sh`。此次没有重启 API/Ollama/ngrok。只复制权重；环境和评测图片包仍按原路径提供，不将本目录称为含数据和环境的完整部署包。权重不提交到 GitHub 源码备份。下文旧外部路径说明仅作历史，以本节为准。
+
 ## 2026-10-12 取消双时相变化任务（当前状态）
 
 用户已取消双时相任务。`tasks/change` 的推理源码、MCI/ChangeFormer 模型接线及专用下载、审计、验证脚本和测试已移除。API 启动不再读取变化模型包或相关环境变量；历史数据、权重、验证报告仍保存在 `runs/change/`。
@@ -61,7 +69,7 @@ Detection 候选 recall@0.5=66/80（82.5%），14条没有合格候选、4条有
 
 VQA 支持 category/color/shape/existence/scene 五类有限词表；short_text 返回模型答案，single_choice 返回原选项键，enum 返回原允许值。只将 constraint.values 声明的单选项传给模型；部分词表外候选仍允许比较已训练且可唯一映射的候选，未知候选不能选中，本地结果记录 choice_coverage。全部候选未知、已知别名重复、枚举含未知值、中文问题及未实现的计数/位置/比较/双图等明确失败。原题逐字传入，无目标提取、翻译或限定词删除；无 ROI、切片或定位证据，不代表完整官网问答能力。
 
-`HFSA_VQA_BUNDLE_DIR` 默认工程内 `runs/vqa/qformer`；`HFSA_VQA_DEVICE` 默认 `cpu`，原任务设备由 `HFSA_API_DEVICE` 控制。VQA 使用同级 HFSA_models 内 `pretrain_model/yolov12m.pt` 和 `openclip/ViT-L-14.pt`，启动严格核对配置、词表、state_dict、模型和外部资产哈希。
+`HFSA_VQA_BUNDLE_DIR` 默认工程内 `runs/vqa/qformer`；`HFSA_VQA_DEVICE` 默认 `cpu`，原任务设备由 `HFSA_API_DEVICE` 控制。VQA 使用权重根目录（默认工程自身）内 `pretrain_model/yolov12m.pt` 和 `openclip/ViT-L-14.pt`，启动严格核对配置、词表、state_dict、模型和外部资产哈希。
 
 本轮正式15轮训练完成、最佳14，全部37392 QA复评通过并封包complete：五类宏平均53.730459%、五类22413 QA总体56.837550%、全QA35.643988%、有效返回58.039153%。同分母旧模型宏平均54.378791%、全QA36.379439%，公开val未提升；该val用于选模，不是独立test或官网成绩。用户已于2026-10-11 18:48重启当前工程API，PID399620监听9001；18:57用户官网smoke的6次HTTP200确认本次认证/公网连通和预测工作，当前入口仅接完整验证的Q-Former v2。部署/小样本分数解释见根目录CURRENT_STATE，原验收报告为训练验收时快照；无独立内存SHA接口，助手未读取进程Key或终端输出。
 

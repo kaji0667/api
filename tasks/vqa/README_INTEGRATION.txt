@@ -34,7 +34,7 @@ HFSA 独立视觉问答模块（当前 Q-Former v2）
   bash scripts/train_vqa.sh
 默认读取 ../vqa_work_20261011/data/train_final.jsonl 和 val_final.jsonl，使用 config/vqa/qformer.json 及 ../vqa_work_20261011/cache/full，输出 runs/vqa/qformer。可用 TRAIN_JSONL、VAL_JSONL、CONFIG、DEVICE、SAVE_DIR 覆盖；已有 manifest 时拒绝覆盖，重复实验须指定新的 SAVE_DIR。
 种子 42，batch 128，最多 15 epochs，早停 patience 4，AdamW（lr=0.001、weight_decay=0.0001），题型均衡有放回采样，答案 CE 加 0.5 题型 CE，余弦学习率；按完整验证集上的五类宏平均选模。正式训练不得设置 max_train_batches 或 max_val_batches 为正值。
-资产路径从启动时工程根目录解析：../HFSA_models/pretrain_model/yolov12m.pt 和 ../HFSA_models/openclip/ViT-L-14.pt。复用已有资产和冻结缓存，不安装新框架或下载新权重。其它机器须准备对应数据与资产并配置路径。
+资产路径从启动时工程根目录解析：pretrain_model/yolov12m.pt 和 openclip/ViT-L-14.pt。正式权重已复制到工程内，与原外部模型文件SHA256一致；复用已有冻结缓存，不安装新框架或下载新权重。其它机器须准备对应数据与资产并配置路径。
 
 全量评估：
   BUNDLE_DIR=runs/vqa/qformer OUT_DIR=runs/vqa/qformer/evaluation bash scripts/eval_vqa.sh --cache-dir ../vqa_work_20261011/cache/full
@@ -47,7 +47,7 @@ API 完整训练门禁：
 
 本地接入：
   from tasks.vqa.inference import VQAPredictor
-  predictor = VQAPredictor('runs/vqa/qformer', device='cpu', asset_paths={'visual_backbone': '../HFSA_models/pretrain_model/yolov12m.pt', 'text_encoder': '../HFSA_models/openclip/ViT-L-14.pt'})
+  predictor = VQAPredictor('runs/vqa/qformer', device='cpu', asset_paths={'visual_backbone': 'pretrain_model/yolov12m.pt', 'text_encoder': 'openclip/ViT-L-14.pt'})
   result = predictor.predict(image, question, choices=None, allowed_answers=None)
 image 为 PIL、str 或 Path。构造时加载一次，严格核对配置、词表、state_dict、权重和外部资产哈希，可连续预测。短文本返回英文答案；单选将可唯一映射到已训练词表的候选按对应答案头概率比较，返回原选项键。部分词表外候选不会导致整题拒答，本地 choice_coverage 记录 provided、matched、unmatched_keys；未知候选无法选中，也不自动当作“都不是”。全部候选未知或已知候选别名重复仍失败。枚举要求所有值可唯一映射，保留允许值大小写。confidence 为原完整答案头概率，不对剩余候选重新归一化；不用 CLIP 相似度或默认选项。规范化包含 lowercase、空白、末尾标点及 grey->gray，多色答案不压缩为单色。
 

@@ -781,7 +781,7 @@ class LoadingBoundaryTests(unittest.TestCase):
                 raise AssertionError("Native factories must not import a Web Predictor")
             return real_import(name, *args, **kwargs)
 
-        with patch.dict(os.environ, {"HFSA_MODELS_DIR": "/synthetic/models", "HFSA_API_DEVICE": "cpu"}, clear=True):
+        with patch.dict(os.environ, {"HFSA_API_DEVICE": "cpu"}, clear=True):
             with patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready") as ready, \
                     patch("hfsa_adapter.validate_api_vqa_bundle"):
                 with patch("hfsa_adapter.Path.is_file", autospec=True, return_value=True) as is_file:
@@ -801,7 +801,11 @@ class LoadingBoundaryTests(unittest.TestCase):
         self.assertEqual(factories["vqa"].call_args.kwargs["bundle_dir"].name, "qformer")
         self.assertEqual(factories["vqa"].call_args.kwargs["device"], "cpu")
         self.assertEqual(set(factories["vqa"].call_args.kwargs["asset_paths"]), {"visual_backbone", "text_encoder"})
-        factories["encoder"].assert_called_once_with(device="cpu")
+        code_dir = Path(__file__).resolve().parents[2]
+        factories["encoder"].assert_called_once_with(
+            device="cpu", pretrained=str(code_dir / "openclip/ViT-L-14.pt"))
+        for name in ("classification", "detection", "counting"):
+            self.assertTrue(factories[name].call_args.kwargs["checkpoint"].is_relative_to(code_dir))
         self.assertIs(factories["detection"].call_args.kwargs["encoder"], factories["encoder"].return_value)
         self.assertEqual(factories["detection"].call_args.kwargs["max_image_size"], 1600)
         self.assertIs(factories["counting"].call_args.kwargs["encoder"], factories["encoder"].return_value)
@@ -818,6 +822,9 @@ class LoadingBoundaryTests(unittest.TestCase):
                     adapter = HFSAAdapter.from_local()
         self.assertEqual(adapter.grounding_backend, "refseg")
         self.assertIs(adapter.refseg, factories["refseg"].return_value)
+        factories["encoder"].assert_called_once_with(
+            device="cpu", pretrained=str(Path("/synthetic/models/openclip/ViT-L-14.pt").resolve()))
+        self.assertTrue(callable(factories["refseg"].call_args.kwargs["text_encoder_factory"]))
         ready.assert_called_once_with()
         factories["refseg"].assert_called_once()
         self.assertTrue(any(call.args[0].name == "best_raw.pt" for call in is_file.call_args_list))

@@ -321,7 +321,7 @@ class HFSAAdapter:
         print("HFSA API: checking local Qwen text router", flush=True)
         ensure_router_ready()
         code_dir = Path(__file__).resolve().parents[1]
-        weights_dir = Path(os.environ.get("HFSA_MODELS_DIR", str(code_dir.parent / "HFSA_models"))).expanduser().resolve()
+        weights_dir = Path(os.environ.get("HFSA_MODELS_DIR", str(code_dir))).expanduser().resolve()
         if str(code_dir) not in sys.path:
             sys.path.insert(0, str(code_dir))
         from native_classification import NativeClassification
@@ -355,7 +355,7 @@ class HFSAAdapter:
             model_yaml=str(code_dir / "ultralytics/cfg/models/v12/yolov12m-classification.yaml"), device=device,
         )
         print("HFSA API: loading detection and shared text encoder", flush=True)
-        shared_encoder = NativeTextEncoder(device=device)
+        shared_encoder = NativeTextEncoder(device=device, pretrained=str(checkpoints["vqa_text"]))
         detection = NativeDetection(
             checkpoint=checkpoints["detection"], device=device, encoder=shared_encoder,
             max_image_size=max_detection_size,
@@ -370,6 +370,16 @@ class HFSAAdapter:
             asset_paths={"visual_backbone": checkpoints["pretrained"],
                          "text_encoder": checkpoints["vqa_text"]},
         )
+        def existing_token_encoder(**kwargs: Any) -> Any:
+            current = shared_encoder.encoder
+            if (kwargs["model_name"] != current.model_name
+                    or kwargs["pretrained"] not in {"openai", str(checkpoints["vqa_text"])}
+                    or current.pretrained != str(checkpoints["vqa_text"])
+                    or kwargs["device"] != str(current.device)
+                    or kwargs["precision"] != "fp32" or not kwargs["normalize"]):
+                raise ValueError("RefSeg encoder configuration differs from the local OpenCLIP asset")
+            return current
+
         refseg = None
         if grounding_backend == "refseg":
             from native_refseg import NativeRefSegPredictor
@@ -378,6 +388,7 @@ class HFSAAdapter:
             refseg = NativeRefSegPredictor(
                 checkpoint=checkpoints["refseg"], device=device,
                 model_yaml=str(code_dir / "ultralytics/cfg/models/v12/yolov12m-semseg.yaml"),
+                text_encoder_factory=existing_token_encoder,
             )
         print(f"HFSA API: bbox grounding backend={grounding_backend}", flush=True)
         adapter = cls(classification, detection, counting, refseg,
@@ -393,15 +404,6 @@ class HFSAAdapter:
             else:
                 import torch
                 from native_refseg import NativeRefSegPredictor
-
-                def existing_token_encoder(**kwargs: Any) -> Any:
-                    current = shared_encoder.encoder
-                    if (kwargs["model_name"] != current.model_name
-                            or kwargs["pretrained"] != current.pretrained
-                            or kwargs["device"] != str(current.device)
-                            or kwargs["precision"] != "fp32" or not kwargs["normalize"]):
-                        raise ValueError("RefSeg parity encoder configuration differs")
-                    return current
 
                 temporary_refseg = NativeRefSegPredictor(
                     checkpoint=weights_dir / "runs/semseg/srp_yolov12m_axis/weights/best_raw.pt",

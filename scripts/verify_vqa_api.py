@@ -317,7 +317,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle-dir", type=Path, required=True)
     parser.add_argument("--examples-dir", type=Path, default=CODE_DIR / "runs/vqa/stage1")
-    parser.add_argument("--models-dir", type=Path, default=CODE_DIR.parent / "HFSA_models")
+    parser.add_argument("--models-dir", type=Path, default=CODE_DIR)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--threads", type=int, default=4)

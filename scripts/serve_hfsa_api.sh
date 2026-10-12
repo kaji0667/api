@@ -10,7 +10,7 @@ fi
 export MODEL_API_KEY MODEL_MODE=real
 export HFSA_ROUTER_URL="${HFSA_ROUTER_URL:-http://127.0.0.1:11434}"
 export HFSA_ROUTER_MODEL="${HFSA_ROUTER_MODEL:-qwen3:1.7b}"
-export HFSA_MODELS_DIR="${HFSA_MODELS_DIR:-$hfsa_code_dir/../HFSA_models}"
+export HFSA_MODELS_DIR="${HFSA_MODELS_DIR:-$hfsa_code_dir}"
 export HFSA_API_DEVICE="${HFSA_API_DEVICE:-auto}"
 export HFSA_VQA_DEVICE="${HFSA_VQA_DEVICE:-cpu}"
 export HFSA_GROUNDING_BACKEND="${HFSA_GROUNDING_BACKEND:-detection}"

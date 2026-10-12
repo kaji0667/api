@@ -14,7 +14,7 @@ python -m pip install -r requirements.txt \
 
 ## 2. 放置模型
 
-将网盘下载的 `HFSA_models.zip` 直接解压到 `HFSA-main/`。解压后应存在：
+正式权重现已复制到 `HFSA-main/` 内。API 与 Web 默认从工程内部读取；部署到其他机器时，将模型文件按以下位置一起携带：
 
 ```text
 pretrain_model/yolov12m.pt
@@ -23,7 +23,10 @@ runs/detect/DIOR-RSVG-ViT-L-14/weights/best.pt
 runs/counting/counting-VRSBench-ViT-L-14/weights/best.pt
 runs/semseg/srp_yolov12m_axis/weights/best_raw.pt
 openclip/ViT-L-14.pt
+runs/vqa/qformer/weights/vqa_head.pt
 ```
+
+VQA 必须保留整个 `runs/vqa/qformer/` 正式模型包，包括 `config/`、`manifest.json` 和绑定的训练/评估记录。根目录 `config/vqa/qformer.json` 是训练参数，不替代模型包配置。权重和模型产物只保存在本地，不纳入源码 Git 备份。
 
 ## 3. 一键启动
 
@@ -37,15 +40,17 @@ Web 单图推理不需要完整数据集。VRSBench、DIOR-RSVG 和 RRSIS-D 原�
 
 ## 4. 官方本地评测 API
 
-`participant_api_starter-main/` 已接入分类、检测、计数、旧版独立VQA及显式指代分割转bbox。它使用同级 `HFSA_models/` 权重目录（可通过 `HFSA_MODELS_DIR` 修改），VQA bundle位于工程内`runs/vqa/stage1/`；与上述 Web 的权重解压位置分别按各自入口解析。
+`participant_api_starter-main/` 已接入分类、检测、计数、正式 Q-Former VQA 及显式指代分割转bbox。默认权重根目录为 `HFSA-main/` 自身，可通过 `HFSA_MODELS_DIR` 显式覆盖；VQA bundle位于工程内 `runs/vqa/qformer/`。检测/计数使用工程内 `openclip/ViT-L-14.pt`，不依赖此前外部模型目录；双时相变化已取消。
 
-启动命令、支持范围和验证方法见 [官方 API 说明](participant_api_starter-main/README.md)。`MODEL_MODE=real` 使用独立任务入口，按原测试的模型、文本、预处理及描述匹配执行，不调用Web Predictor。默认加载分类/检测/计数/旧VQA，显式RefSeg才增加分割；终端显示 `API listening` 后才接题。VQA默认CPU以留出8GB显存，可通过`HFSA_VQA_DEVICE`修改。保持既有环境、9001、Key及Ngrok，实际运行状态和用户官网成绩见项目CURRENT_STATE；接口连通与准确率分别记录。
+启动命令、支持范围和验证方法见 [官方 API 说明](participant_api_starter-main/README.md)。`MODEL_MODE=real` 使用独立任务入口，按原测试的模型、文本、预处理及描述匹配执行，不调用Web Predictor。默认加载分类/检测/计数/Q-Former VQA，显式RefSeg才增加分割；终端显示 `API listening` 后才接题。VQA默认CPU以留出8GB显存，可通过`HFSA_VQA_DEVICE`修改。保持既有环境、9001、Key及Ngrok，实际运行状态和用户官网成绩见项目CURRENT_STATE；接口连通与准确率分别记录。
 
 用户接受目标计数条件降级：带区域或关系限定的问题也按全图同类数量返回，不把全图数量称为正确区域计数。定位描述仍完整保留；代码修改后需重启API，已有Ngrok无需重新建立。
 
 检测大图部署使用原测试可配置的输入尺寸和rect处理：`HFSA_DETECTION_MAX_IMGSZ` 默认1600，小图保留800；设800可恢复原默认尺寸。正式权重本机CPU重放的两条定位请求已返回合法框，并与同尺寸原test推理/描述匹配/坐标恢复一致；未验证官网IoU或新GPU服务状态。
 
-## 5. 独立视觉问答第一阶段
+## 5. 独立视觉问答第一阶段（历史记录）
+
+以下保留旧第一阶段实验说明；当前 API 仅接受完成完整训练/验证的 Q-Former v2，使用 `runs/vqa/qformer/`，不回退旧架构。
 
 问答代码位于 `tasks/vqa/`，主模型权重、配置、真实验证结果及公开样例位于 `runs/vqa/stage1/`；独立仅问题/仅图像基线分别位于 `runs/vqa/question_only/`、`runs/vqa/image_only/`。支持类别、颜色、形状、存在和场景五类答案；旧版已接入官方API的vqa分支，Web保持原状。
 
