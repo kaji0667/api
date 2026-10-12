@@ -15,7 +15,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hfsa_adapter import AdapterFailure, HFSAAdapter, parse_question
-from ollama_router import RouterError
+from ollama_router import RouterError, route_question as real_route_question
 
 
 def request(question="Synthetic question", kind="short_text", **kwargs):
@@ -327,6 +327,30 @@ class AdapterTests(unittest.TestCase):
         self.detection.predict.assert_called_once_with(self.image, value["question"])
         self.refseg.predict.assert_not_called()
         self.assertEqual(parse_question(value).original_question, value["question"])
+
+    def test_real_bbox_route_reaches_detection_without_ollama(self):
+        question = " \tLocate it.\nDescription: The lawn at the lower left. A road is above it. \n"
+        value = request(question, "bbox", images=[{}], image_width=80, image_height=40)
+        self.detection.predict.return_value.grounding_index = 0
+        with patch("hfsa_adapter.route_question", wraps=real_route_question), \
+                patch("ollama_router.urllib.request.build_opener") as opener:
+            self.assertEqual(self.predict(value), [1, 2, 4, 6])
+            self.assertEqual(parse_question(value).original_question, question)
+            opener.assert_not_called()
+        self.detection.predict.assert_called_once_with(self.image, question)
+        self.refseg.predict.assert_not_called()
+        self.counting.predict.assert_not_called()
+        self.vqa.predict.assert_not_called()
+
+    def test_real_bbox_route_rejects_two_images_before_visual_inference(self):
+        value = request(kind="bbox", images=[{}, {}], image_width=80, image_height=40)
+        with patch("hfsa_adapter.route_question", wraps=real_route_question), \
+                patch("ollama_router.urllib.request.build_opener") as opener:
+            with self.assertRaises(AdapterFailure) as context:
+                self.predict(value, images=[self.image, self.image])
+            self.assertEqual(context.exception.code, "router_no_compatible_executor")
+            opener.assert_not_called()
+        self.assert_no_predictors_called()
 
     def test_detection_bbox_rounds_outward_and_clips_all_edges(self):
         self.select("visual_grounding")

@@ -1,4 +1,4 @@
-"""Bounded local task selector; HFSA predictors receive the source question."""
+"""Direct single-image bbox routing; other tasks use the bounded local selector."""
 
 from __future__ import annotations
 
@@ -111,6 +111,10 @@ def route_question(request: dict[str, Any]) -> dict[str, Any]:
     # Bound input explicitly; do not silently truncate referring conditions.
     if len(content) > 2500:
         raise RouterError("router_input_too_long")
+    # The validated single-image bbox contract has exactly one executor.
+    # Keep the source question intact and avoid an unnecessary Ollama call.
+    if request["response_constraint"]["type"] == "bbox":
+        return {"task": "visual_grounding"}
     base = os.environ.get("HFSA_ROUTER_URL", "http://127.0.0.1:11434").rstrip("/")
     url = urllib.parse.urlsplit(base)
     if (url.scheme != "http" or url.hostname not in {"127.0.0.1", "localhost", "::1"}

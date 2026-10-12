@@ -1,9 +1,10 @@
-"""Mock-only checks of the task selector HTTP and failure boundaries."""
+"""Deterministic bbox routing and mocked selector HTTP/failure boundaries."""
 
 import json
 import os
 import sys
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -170,13 +171,44 @@ class RouterTests(unittest.TestCase):
                 _, body = self.sent_body()
                 self.assertNotIn("visual_grounding", body["format"]["properties"]["task"]["enum"])
 
-    def test_bbox_excludes_single_image_non_grounding_executors(self):
-        value = {**self.value, "response_constraint": {"type": "bbox"}}
-        self.reply({"task": "visual_grounding"})
-        self.assertEqual(route_question(value)["task"], "visual_grounding")
-        _, body = self.sent_body()
-        self.assertEqual(body["format"]["properties"]["task"]["enum"],
+    def test_bbox_routes_without_http_and_preserves_request(self):
+        value = {
+            **self.value,
+            "question": " \tFind the box.\nDescription: The lawn. A road is above it. \n",
+            "response_constraint": {"type": "bbox", "coordinate_format": "pixel_xyxy", "length": 4},
+            "answer_type": "bbox", "image_width": 80, "image_height": 40,
+        }
+        original = deepcopy(value)
+        self.assertEqual(route_question(value), {"task": "visual_grounding"})
+        self.assertEqual(value, original)
+        self.assertEqual(schema_for_request(value)["properties"]["task"]["enum"],
                          ["visual_grounding"])
+        self.build_opener.assert_not_called()
+        self.opener.open.assert_not_called()
+
+    def test_bbox_does_not_depend_on_ollama_availability_or_configuration(self):
+        value = {**self.value, "response_constraint": {"type": "bbox"}}
+        self.opener.open.side_effect = TimeoutError("Ollama unavailable")
+        self.reply({"task": "vqa"})
+        with patch.dict(os.environ, {"HFSA_ROUTER_URL": "invalid", "HFSA_ROUTER_TIMEOUT": "invalid"}):
+            self.assertEqual(route_question(value), {"task": "visual_grounding"})
+        self.build_opener.assert_not_called()
+        self.opener.open.assert_not_called()
+
+    def test_bbox_keeps_question_length_and_image_count_validation(self):
+        value = {**self.value, "response_constraint": {"type": "bbox"}}
+        for changes, expected in (
+            ({"question": " \t\r\n"}, "router_empty_question"),
+            ({"question": "x" * 2501}, "router_input_too_long"),
+            ({"images": []}, "router_invalid_image_count"),
+            ({"images": [{}, {}]}, "router_no_compatible_executor"),
+            ({"images": [{}, {}, {}]}, "router_invalid_image_count"),
+        ):
+            with self.subTest(changes=changes), self.assertRaises(RouterError) as context:
+                route_question({**value, **changes})
+            self.assertEqual(context.exception.code, expected)
+        self.build_opener.assert_not_called()
+        self.opener.open.assert_not_called()
 
     def test_change_does_not_accept_bbox_or_integer_contract(self):
         for kind in ("bbox", "integer"):
@@ -217,14 +249,12 @@ class RouterTests(unittest.TestCase):
                 self.reply({"task": task})
                 self.assertEqual(route_question(value)["task"], task)
 
-    def test_vqa_cannot_request_integer_or_bbox_answers(self):
-        for kind in ("integer", "bbox"):
-            with self.subTest(kind=kind):
-                self.reply({"task": "vqa"})
-                value = {**self.value, "response_constraint": {"type": kind}}
-                with self.assertRaises(RouterError) as raised:
-                    route_question(value)
-                self.assertEqual(raised.exception.code, "task_constraint_mismatch")
+    def test_vqa_cannot_request_integer_answers(self):
+        self.reply({"task": "vqa"})
+        value = {**self.value, "response_constraint": {"type": "integer"}}
+        with self.assertRaises(RouterError) as raised:
+            route_question(value)
+        self.assertEqual(raised.exception.code, "task_constraint_mismatch")
 
     def test_invalid_constraint_or_image_count_fails_before_http(self):
         for value in (
