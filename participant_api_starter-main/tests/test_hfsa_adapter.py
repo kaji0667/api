@@ -50,7 +50,7 @@ class AdapterTests(unittest.TestCase):
         self.vqa.predict.return_value = {"status": "ok", "answer": "ship", "question_type": "category"}
         self.adapter = HFSAAdapter(
             self.classification, self.detection, self.counting,
-            self.refseg, vqa=self.vqa, change=None,
+            self.refseg, vqa=self.vqa,
         )
         self.route = {"task": "counting"}
         self.router_patch = patch(
@@ -70,7 +70,7 @@ class AdapterTests(unittest.TestCase):
     def use_grounding_backend(self, backend):
         self.adapter = HFSAAdapter(
             self.classification, self.detection, self.counting,
-            self.refseg, grounding_backend=backend, vqa=self.vqa, change=None,
+            self.refseg, grounding_backend=backend, vqa=self.vqa,
         )
 
     def assert_no_predictors_called(self):
@@ -344,11 +344,12 @@ class AdapterTests(unittest.TestCase):
 
     def test_real_bbox_route_rejects_two_images_before_visual_inference(self):
         value = request(kind="bbox", images=[{}, {}], image_width=80, image_height=40)
-        with patch("hfsa_adapter.route_question", wraps=real_route_question), \
+        with patch("hfsa_adapter.route_question", wraps=real_route_question) as router, \
                 patch("ollama_router.urllib.request.build_opener") as opener:
             with self.assertRaises(AdapterFailure) as context:
                 self.predict(value, images=[self.image, self.image])
-            self.assertEqual(context.exception.code, "router_no_compatible_executor")
+            self.assertEqual(context.exception.code, "unsupported_image_count")
+            router.assert_not_called()
             opener.assert_not_called()
         self.assert_no_predictors_called()
 
@@ -542,10 +543,10 @@ class AdapterTests(unittest.TestCase):
         self.assert_no_predictors_called()
 
     def test_two_images_never_run_single_image_predictors(self):
-        self.select("change")
         with self.assertRaises(AdapterFailure) as raised:
             self.predict(request(), [self.image, self.image])
-        self.assertEqual(raised.exception.code, "change_not_configured")
+        self.assertEqual(raised.exception.code, "unsupported_image_count")
+        self.router.assert_not_called()
         self.select("counting")
         with self.assertRaises(AdapterFailure):
             self.predict(request(kind="integer"), [self.image, self.image])
@@ -695,7 +696,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertNotIn("answer", record)
 
     def test_failed_request_capture_excludes_credentials_and_gold(self):
-        self.select("change")
+        self.router.side_effect = RouterError("router_invalid_output")
         value = request(
             "Describe this private replay question.",
             protocol_version="2.0", item_id="TEST_REPLAY",
@@ -746,7 +747,7 @@ class DiagnosticTests(unittest.TestCase):
 class LoadingBoundaryTests(unittest.TestCase):
     def fake_predictor_modules(self):
         factories = {name: Mock() for name in (
-            "classification", "detection", "counting", "refseg", "encoder", "vqa", "change", "binary_change",
+            "classification", "detection", "counting", "refseg", "encoder", "vqa",
         )}
         modules = {}
         attributes = {
@@ -760,8 +761,6 @@ class LoadingBoundaryTests(unittest.TestCase):
             "native_counting": {"NativeCounting": factories["counting"]},
             "native_refseg": {"NativeRefSegPredictor": factories["refseg"]},
             "tasks.vqa.inference": {"VQAPredictor": factories["vqa"]},
-            "tasks.change.inference": {"ChangePredictor": factories["change"]},
-            "tasks.change.binary_change": {"BinaryChangePredictor": factories["binary_change"]},
         }
         for name, fields in attributes.items():
             module = ModuleType(name)
@@ -775,6 +774,8 @@ class LoadingBoundaryTests(unittest.TestCase):
         real_import = __import__
 
         def guard_import(name, *args, **kwargs):
+            if name == "tasks.change" or name.startswith("tasks.change."):
+                raise AssertionError("Removed temporal models must not be imported")
             if name in {"native_refseg", "tasks.refseg.inference", "tasks.routing.adapters.refseg",
                         "tasks.classification.inference", "tasks.detection.inference", "tasks.counting.inference"}:
                 raise AssertionError("Native factories must not import a Web Predictor")
@@ -791,17 +792,12 @@ class LoadingBoundaryTests(unittest.TestCase):
         ready.assert_called_once_with()
         factories["refseg"].assert_not_called()
         self.assertFalse(any(call.args[0].name == "best_raw.pt" for call in is_file.call_args_list))
-        for name in ("classification", "detection", "counting", "vqa", "change", "binary_change"):
+        for name in ("classification", "detection", "counting", "vqa"):
             factories[name].assert_called_once()
         self.assertIs(adapter.vqa, factories["vqa"].return_value)
-        self.assertIs(adapter.change, factories["change"].return_value)
-        self.assertEqual(factories["change"].call_args.kwargs["bundle_dir"].name, "mci")
-        self.assertEqual(factories["change"].call_args.kwargs["device"], "cpu")
-        self.assertIs(factories["change"].call_args.kwargs["binary_predictor"], factories["binary_change"].return_value)
-        self.assertEqual(factories["binary_change"].call_args.kwargs["bundle_dir"].name, "changeformer_dsifn")
-        self.assertEqual(factories["binary_change"].call_args.kwargs["device"], "cpu")
-        self.assertTrue(any(call.args[0].name == "manifest.json" and call.args[0].parent.name == "mci"
-                            for call in is_file.call_args_list))
+        self.assertFalse(hasattr(adapter, "change"))
+        self.assertFalse(any(call.args[0].parent.name in {"mci", "changeformer_dsifn"}
+                             for call in is_file.call_args_list))
         self.assertEqual(factories["vqa"].call_args.kwargs["bundle_dir"].name, "qformer")
         self.assertEqual(factories["vqa"].call_args.kwargs["device"], "cpu")
         self.assertEqual(set(factories["vqa"].call_args.kwargs["asset_paths"]), {"visual_backbone", "text_encoder"})
@@ -824,86 +820,7 @@ class LoadingBoundaryTests(unittest.TestCase):
         self.assertIs(adapter.refseg, factories["refseg"].return_value)
         ready.assert_called_once_with()
         factories["refseg"].assert_called_once()
-        factories["change"].assert_called_once()
-        self.assertIs(adapter.change, factories["change"].return_value)
         self.assertTrue(any(call.args[0].name == "best_raw.pt" for call in is_file.call_args_list))
-
-    def test_change_bundle_and_device_overrides_are_passed_to_one_independent_factory(self):
-        modules, factories = self.fake_predictor_modules()
-        with patch.dict(os.environ, {
-            "HFSA_MODELS_DIR": "/synthetic/models", "HFSA_API_DEVICE": "cpu",
-            "HFSA_CHANGE_BUNDLE_DIR": "/synthetic/independent-change", "HFSA_CHANGE_DEVICE": "cpu",
-            "HFSA_BINARY_CHANGE_BUNDLE_DIR": "/synthetic/independent-binary", "HFSA_BINARY_CHANGE_DEVICE": "cpu",
-        }, clear=True):
-            with patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
-                    patch("hfsa_adapter.validate_api_vqa_bundle"):
-                with patch("hfsa_adapter.Path.is_file", autospec=True, return_value=True), \
-                        redirect_stdout(io.StringIO()):
-                    adapter = HFSAAdapter.from_local()
-        factories["change"].assert_called_once_with(
-            bundle_dir=Path("/synthetic/independent-change").resolve(), device="cpu",
-            binary_predictor=factories["binary_change"].return_value,
-        )
-        factories["binary_change"].assert_called_once_with(
-            bundle_dir=Path("/synthetic/independent-binary").resolve(), device="cpu",
-        )
-        self.assertIs(adapter.change, factories["change"].return_value)
-
-    def test_missing_change_manifest_fails_before_any_model_construction(self):
-        modules, factories = self.fake_predictor_modules()
-        with patch.dict(os.environ, {"HFSA_MODELS_DIR": "/synthetic/models"}, clear=True):
-            with patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
-                    patch("hfsa_adapter.validate_api_vqa_bundle"):
-                with patch("hfsa_adapter.Path.is_file", autospec=True,
-                           side_effect=lambda path: not (path.name == "manifest.json" and path.parent.name == "mci")), \
-                        redirect_stdout(io.StringIO()):
-                    with self.assertRaises(FileNotFoundError):
-                        HFSAAdapter.from_local()
-        for factory in factories.values():
-            factory.assert_not_called()
-
-    def test_invalid_change_bundle_stops_before_shared_model_construction(self):
-        modules, factories = self.fake_predictor_modules()
-        factories["change"].side_effect = ValueError("synthetic invalid change bundle")
-        with patch.dict(os.environ, {"HFSA_MODELS_DIR": "/synthetic/models"}, clear=True):
-            with patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
-                    patch("hfsa_adapter.validate_api_vqa_bundle"):
-                with patch("hfsa_adapter.Path.is_file", autospec=True, return_value=True), \
-                        redirect_stdout(io.StringIO()):
-                    with self.assertRaises(ValueError):
-                        HFSAAdapter.from_local()
-        factories["change"].assert_called_once()
-        for name, factory in factories.items():
-            if name not in {"change", "binary_change"}:
-                factory.assert_not_called()
-
-    def test_missing_binary_manifest_fails_before_any_model_construction(self):
-        modules, factories = self.fake_predictor_modules()
-        with patch.dict(os.environ, {"HFSA_MODELS_DIR": "/synthetic/models"}, clear=True):
-            with patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
-                    patch("hfsa_adapter.validate_api_vqa_bundle"), \
-                    patch("hfsa_adapter.Path.is_file", autospec=True,
-                          side_effect=lambda path: not (path.name == "manifest.json" and path.parent.name == "changeformer_dsifn")), \
-                    redirect_stdout(io.StringIO()):
-                with self.assertRaises(FileNotFoundError):
-                    HFSAAdapter.from_local()
-        for factory in factories.values():
-            factory.assert_not_called()
-
-    def test_invalid_binary_bundle_stops_before_mci_or_shared_model_construction(self):
-        modules, factories = self.fake_predictor_modules()
-        factories["binary_change"].side_effect = ValueError("synthetic invalid binary bundle")
-        with patch.dict(os.environ, {"HFSA_MODELS_DIR": "/synthetic/models"}, clear=True):
-            with patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
-                    patch("hfsa_adapter.validate_api_vqa_bundle"), \
-                    patch("hfsa_adapter.Path.is_file", autospec=True, return_value=True), \
-                    redirect_stdout(io.StringIO()):
-                with self.assertRaises(ValueError):
-                    HFSAAdapter.from_local()
-        factories["binary_change"].assert_called_once()
-        for name, factory in factories.items():
-            if name != "binary_change":
-                factory.assert_not_called()
 
     def test_invalid_backend_fails_before_router_or_weight_loading(self):
         with patch.dict(os.environ, {"HFSA_GROUNDING_BACKEND": "unknown"}):

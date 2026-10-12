@@ -131,7 +131,7 @@ class RouterTests(unittest.TestCase):
                 "type": "single_choice", "values": ["A", "B"],
                 "case_insensitive": False,
             },
-            "images": [{}, {}],
+            "images": [{}],
         }
         self.reply({"task": "vqa"})
         route_question(value)
@@ -139,7 +139,7 @@ class RouterTests(unittest.TestCase):
         sent = json.loads(body["messages"][1]["content"])
         for field in ("question", "choices", "response_constraint"):
             self.assertEqual(sent[field], value[field])
-        self.assertEqual(sent["image_count"], 2)
+        self.assertEqual(sent["image_count"], 1)
 
     def test_oversize_question_fails_before_http_without_truncation(self):
         value = {**self.value, "question": " \tDescription: " + "红 ships\n" * 400 + " \n"}
@@ -210,8 +210,8 @@ class RouterTests(unittest.TestCase):
         self.build_opener.assert_not_called()
         self.opener.open.assert_not_called()
 
-    def test_change_does_not_accept_bbox_or_integer_contract(self):
-        for kind in ("bbox", "integer"):
+    def test_two_images_are_rejected_for_every_answer_contract_before_http(self):
+        for kind in ("bbox", "integer", "short_text", "enum", "single_choice"):
             with self.subTest(kind=kind):
                 value = {**self.value, "images": [{}, {}], "response_constraint": {"type": kind}}
                 with self.assertRaises(RouterError) as context:
@@ -219,16 +219,14 @@ class RouterTests(unittest.TestCase):
                 self.assertEqual(context.exception.code, "router_no_compatible_executor")
         self.opener.open.assert_not_called()
 
-    def test_two_images_allow_only_two_image_semantic_tasks(self):
-        value = {**self.value, "images": [{}, {}], "response_constraint": {"type": "short_text"}}
+    def test_removed_temporal_label_is_rejected_for_single_image(self):
         self.reply({"task": "change"})
-        route_question(value)
-        _, body = self.sent_body()
-        self.assertEqual(body["format"]["properties"]["task"]["enum"], ["change", "vqa"])
-        self.reply({"task": "counting"})
+        value = {**self.value, "response_constraint": {"type": "short_text"}}
         with self.assertRaises(RouterError) as context:
             route_question(value)
-        self.assertEqual(context.exception.code, "task_constraint_mismatch")
+        self.assertEqual(context.exception.code, "router_invalid_output")
+        _, body = self.sent_body()
+        self.assertNotIn("change", body["format"]["properties"]["task"]["enum"])
 
     def test_request_schemas_do_not_mutate_global_or_other_requests(self):
         bbox = schema_for_request({"response_constraint": {"type": "bbox"}})

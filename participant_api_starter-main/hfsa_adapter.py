@@ -96,11 +96,6 @@ _DIAGNOSTIC_REASONS = frozenset({
     "vqa_not_configured", "vqa_invalid_options", "vqa_invalid_input", "invalid_vqa_result",
     "vqa_answer_contract", "vqa_unsupported_language", "vqa_unsupported_task",
     "vqa_choice_unmatched", "vqa_text_context_exceeded", "vqa_nonfinite_prediction",
-    "change_not_configured", "change_invalid_options", "invalid_change_result",
-    "change_answer_contract", "change_unsupported_task", "change_unsupported_constraint",
-    "change_insufficient_evidence", "change_ambiguous_region", "change_invalid_input",
-    "change_image_dimensions_mismatch", "change_input_too_long", "change_answer_unmatched",
-    "change_answerer_unavailable_or_timeout", "change_answerer_invalid_output",
 })
 _DIAGNOSTIC_ERROR_TYPES = frozenset({
     "AdapterFailure", "ValueError", "TypeError", "KeyError", "RuntimeError", "OSError",
@@ -204,7 +199,7 @@ def _prediction_diagnostic(request: dict[str, Any], image_count: int,
         record["error_type"] = name if name in _DIAGNOSTIC_ERROR_TYPES else "Exception"
     if execution_metadata:
         executor = execution_metadata.get("executor")
-        if isinstance(executor, str) and executor in {"classification", "counting", "detection", "refseg", "vqa", "change"}:
+        if isinstance(executor, str) and executor in {"classification", "counting", "detection", "refseg", "vqa"}:
             record["executor"] = executor
     if task in {"presence", "visual_grounding"} and execution_metadata:
         diagnostic = execution_metadata.get("detection_inference")
@@ -305,7 +300,7 @@ def validate_api_vqa_bundle(bundle_dir: str | Path) -> dict[str, Any]:
 
 class HFSAAdapter:
     def __init__(self, classification: Any, detection: Any, counting: Any, refseg: Any,
-                 *, grounding_backend: str = "detection", vqa: Any = None, change: Any = None) -> None:
+                 *, grounding_backend: str = "detection", vqa: Any = None) -> None:
         if grounding_backend not in {"detection", "refseg"}:
             raise ValueError("Grounding backend must be detection or refseg")
         self.classification = classification
@@ -313,7 +308,6 @@ class HFSAAdapter:
         self.counting = counting
         self.refseg = refseg
         self.vqa = vqa
-        self.change = change
         self.grounding_backend = grounding_backend
 
     @classmethod
@@ -334,17 +328,11 @@ class HFSAAdapter:
         from native_counting import NativeCounting
         from native_detection import NativeDetection, NativeTextEncoder
         from tasks.vqa.inference import VQAPredictor
-        from tasks.change.inference import ChangePredictor
-        from tasks.change.binary_change import BinaryChangePredictor
 
         device = os.environ.get("HFSA_API_DEVICE", "auto").strip() or "auto"
         # Keep the additional frozen VQA encoders off the 8-GiB deployment GPU.
         vqa_device = os.environ.get("HFSA_VQA_DEVICE", "cpu").strip() or "cpu"
         vqa_bundle = Path(os.environ.get("HFSA_VQA_BUNDLE_DIR", str(code_dir / "runs/vqa/qformer"))).expanduser().resolve()
-        change_device = os.environ.get("HFSA_CHANGE_DEVICE", "cpu").strip() or "cpu"
-        change_bundle = Path(os.environ.get("HFSA_CHANGE_BUNDLE_DIR", str(code_dir / "runs/change/mci"))).expanduser().resolve()
-        binary_device = os.environ.get("HFSA_BINARY_CHANGE_DEVICE", "cpu").strip() or "cpu"
-        binary_bundle = Path(os.environ.get("HFSA_BINARY_CHANGE_BUNDLE_DIR", str(code_dir / "runs/change/changeformer_dsifn"))).expanduser().resolve()
         checkpoints = {
             "classification": weights_dir / "runs/classification/vrsbench_scene/weights/best.pt",
             "detection": weights_dir / "runs/detect/DIOR-RSVG-ViT-L-14/weights/best.pt",
@@ -352,8 +340,6 @@ class HFSAAdapter:
             "pretrained": weights_dir / "pretrain_model/yolov12m.pt",
             "vqa_text": weights_dir / "openclip/ViT-L-14.pt",
             "vqa_manifest": vqa_bundle / "manifest.json",
-            "change_manifest": change_bundle / "manifest.json",
-            "binary_change_manifest": binary_bundle / "manifest.json",
         }
         if grounding_backend == "refseg":
             checkpoints["refseg"] = weights_dir / "runs/semseg/srp_yolov12m_axis/weights/best_raw.pt"
@@ -362,12 +348,6 @@ class HFSAAdapter:
                 raise FileNotFoundError(f"Missing {name} weights: {path}")
 
         validate_api_vqa_bundle(vqa_bundle)
-
-        print(f"HFSA API: loading pretrained binary change model on {binary_device}", flush=True)
-        binary_change = BinaryChangePredictor(bundle_dir=binary_bundle, device=binary_device)
-        print(f"HFSA API: loading pretrained MCI change model on {change_device}", flush=True)
-        change = ChangePredictor(bundle_dir=change_bundle, device=change_device,
-                                 binary_predictor=binary_change)
 
         print("HFSA API: loading scene classification", flush=True)
         classification = NativeClassification(
@@ -401,7 +381,7 @@ class HFSAAdapter:
             )
         print(f"HFSA API: bbox grounding backend={grounding_backend}", flush=True)
         adapter = cls(classification, detection, counting, refseg,
-                      grounding_backend=grounding_backend, vqa=vqa, change=change)
+                      grounding_backend=grounding_backend, vqa=vqa)
         # Explicit local validation reuses the models about to serve requests.
         # It never loads a duplicate detector/CLIP or uses scoring annotations.
         if os.environ.get("HFSA_API_VERIFY_PARITY") == "1":
@@ -575,16 +555,10 @@ class HFSAAdapter:
         execution_metadata: dict[str, Any] = {}
         _capture_replay_request(request)
         try:
+            if len(image_paths) != 1:
+                raise AdapterFailure("unsupported_image_count", "Single-image executors require one image")
             plan = parse_question(request)
-            if plan.task == "change":
-                if len(image_paths) != 2:
-                    raise AdapterFailure("unsupported_image_count", "Change executor requires two images")
-                answer = self._change(request, image_paths[0], image_paths[1], plan.original_question,
-                                      execution_metadata)
-            else:
-                if len(image_paths) != 1:
-                    raise AdapterFailure("unsupported_image_count", "Single-image executors require one image")
-                answer = self._predict_plan(request, image_paths[0], plan, execution_metadata)
+            answer = self._predict_plan(request, image_paths[0], plan, execution_metadata)
         except TaskInputError as error:
             failure = AdapterFailure(error.code, "Native task input cannot be processed", task=plan.task if plan else None)
             _prediction_diagnostic(request, len(image_paths), plan, started, failure, execution_metadata)
@@ -593,52 +567,6 @@ class HFSAAdapter:
             _prediction_diagnostic(request, len(image_paths), plan, started, error, execution_metadata)
             raise
         _prediction_diagnostic(request, len(image_paths), plan, started, execution_metadata=execution_metadata)
-        return answer
-
-    def _change(self, request: dict[str, Any], before: Path, after: Path, question: str,
-                execution_metadata: dict[str, Any] | None = None) -> str:
-        if self.change is None:
-            raise AdapterFailure("change_not_configured", "Pretrained change executor is not loaded")
-        constraint = request["response_constraint"]
-        kind = constraint["type"]
-        if kind not in {"short_text", "enum", "single_choice"}:
-            raise AdapterFailure("task_constraint_mismatch", "Change answer format is unsupported", task="change")
-        values = constraint.get("values")
-        choices = None
-        if kind in {"enum", "single_choice"}:
-            if (not isinstance(values, list) or not values
-                    or not all(isinstance(value, str) and value for value in values)
-                    or len(set(values)) != len(values)):
-                raise AdapterFailure("change_invalid_options", "Invalid change answer options")
-        if kind == "single_choice":
-            supplied = request.get("choices")
-            if (not isinstance(supplied, dict) or any(value not in supplied for value in values)
-                    or not all(isinstance(supplied[value], str) and supplied[value] for value in values)):
-                raise AdapterFailure("change_invalid_options", "Invalid change answer options")
-            choices = {value: supplied[value] for value in values}
-        if execution_metadata is not None:
-            execution_metadata["executor"] = "change"
-        result = self.change.predict(before, after, question,
-                                     response_constraint=constraint, choices=choices)
-        supported = getattr(result, "supported", None)
-        if type(supported) is not bool:
-            raise AdapterFailure("invalid_change_result", "Invalid change output")
-        if not supported:
-            reasons = {"unsupported_task", "unsupported_constraint", "insufficient_evidence",
-                       "ambiguous_region", "invalid_input", "image_dimensions_mismatch",
-                       "invalid_options", "input_too_long", "answer_unmatched",
-                       "answerer_unavailable_or_timeout", "answerer_invalid_output"}
-            reason = getattr(result, "reason", None)
-            if not isinstance(reason, str) or reason not in reasons:
-                raise AdapterFailure("invalid_change_result", "Invalid change failure output")
-            raise AdapterFailure("change_" + reason, "Pretrained change model cannot answer this request")
-        answer = getattr(result, "answer", None)
-        if not isinstance(answer, str) or not answer.strip() or len(answer) > 4096:
-            raise AdapterFailure("invalid_change_result", "Invalid change answer")
-        if kind in {"enum", "single_choice"} and answer not in values:
-            raise AdapterFailure("change_answer_contract", "Change answer is outside allowed values")
-        if kind == "short_text" and len(answer) < constraint.get("min_length", 1):
-            raise AdapterFailure("change_answer_contract", "Change answer is shorter than required")
         return answer
 
     def _predict_plan(self, request: dict[str, Any], image: Path,

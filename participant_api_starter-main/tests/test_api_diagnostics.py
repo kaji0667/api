@@ -42,15 +42,11 @@ class PersistentDiagnosticTests(unittest.TestCase):
         self.vqa.predict.return_value = {
             "status": "ok", "answer": "private-model-answer", "question_type": "category",
         }
-        self.change = Mock()
-        self.change.predict.return_value = SimpleNamespace(
-            supported=True, answer="private-change-answer",
-        )
         self.adapter = HFSAAdapter(self.classification, self.detection, self.counting,
-                                   None, vqa=self.vqa, change=self.change)
+                                   None, vqa=self.vqa)
         self.output = io.StringIO()
 
-    def predict(self, task="counting", kind="integer", **extra):
+    def predict(self, task="counting", kind="integer", image_count=1, **extra):
         self.route.return_value = {"task": task}
         request = {
             "question": "private-question-text", "response_constraint": {"type": kind},
@@ -59,7 +55,7 @@ class PersistentDiagnosticTests(unittest.TestCase):
             "headers": {"Authorization": "private-bearer-token"},
             "api_key": "private-api-key", "answer": "private-gold-answer", **extra,
         }
-        images = [Path("/private/image-path")] * (2 if task == "change" else 1)
+        images = [Path("/private/image-path")] * image_count
         with redirect_stderr(self.output):
             return self.adapter.predict(request, images)
 
@@ -69,10 +65,9 @@ class PersistentDiagnosticTests(unittest.TestCase):
     def test_append_records_match_stderr_and_exclude_content(self):
         self.assertEqual(self.predict(), "3")
         self.assertEqual(self.predict("vqa", "short_text"), "private-model-answer")
-        self.assertEqual(self.predict("change", "short_text"), "private-change-answer")
         rows = self.rows()
         self.assertEqual(rows, [json.loads(line) for line in self.output.getvalue().splitlines()])
-        self.assertEqual([row["executor"] for row in rows], ["counting", "vqa", "change"])
+        self.assertEqual([row["executor"] for row in rows], ["counting", "vqa"])
         for row in rows:
             self.assertEqual(row["status"], "succeeded")
             self.assertIsNone(row["reason"])
@@ -98,15 +93,17 @@ class PersistentDiagnosticTests(unittest.TestCase):
         self.assertEqual((row["task"], row["executor"], row["status"], row["reason"]),
                          ("vqa", "vqa", "failed", "vqa_unsupported_task"))
 
-    def test_before_model_rejection_does_not_claim_executor(self):
-        self.adapter.change = None
-        with self.assertRaises(AdapterFailure):
-            self.predict("change", "short_text")
+    def test_two_image_rejection_precedes_routing_and_model_execution(self):
+        with self.assertRaises(AdapterFailure) as raised:
+            self.predict(image_count=2)
+        self.assertEqual(raised.exception.code, "unsupported_image_count")
         row = self.rows()[0]
-        self.assertEqual(row["task"], "change")
+        self.assertIsNone(row["task"])
         self.assertIsNone(row["executor"])
-        self.assertEqual(row["reason"], "change_not_configured")
-        self.change.predict.assert_not_called()
+        self.assertEqual(row["reason"], "unsupported_image_count")
+        self.route.assert_not_called()
+        for predictor in (self.classification, self.detection, self.counting, self.vqa):
+            predictor.predict.assert_not_called()
 
     def test_unknown_code_and_exception_class_cannot_leak_arbitrary_text(self):
         self.counting.predict.side_effect = AdapterFailure("private-code-token", "private-message")

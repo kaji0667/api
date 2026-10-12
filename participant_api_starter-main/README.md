@@ -1,33 +1,21 @@
 # 参赛队伍最小模型 API 示例（协议 2.0）
 
-## 2026-10-12 变化区域与安全诊断更新
+## 2026-10-12 取消双时相变化任务（当前状态）
 
-`MODEL_MODE=real` 的task router仍只选任务，原题与两图顺序保留。启动时新增严格加载 `BinaryChangePredictor` 并传入原 `ChangePredictor`：通用最大变化区域走ChangeFormerV6/DSIFN独立二值mask，明确道路/建筑区域和caption走原MCI，模型构造一次复用。默认 `HFSA_BINARY_CHANGE_BUNDLE_DIR=runs/change/changeformer_dsifn`、`HFSA_BINARY_CHANGE_DEVICE=cpu`，不变更定位/计数/VQA或共享模型。缺失/不匹配模型包在监听前失败。
+用户已取消双时相任务。`tasks/change` 的推理源码、MCI/ChangeFormer 模型接线及专用下载、审计、验证脚本和测试已移除。API 启动不再读取变化模型包或相关环境变量；历史数据、权重、验证报告仍保存在 `runs/change/`。
 
-完整四/九区候选和题干几何必须一致，按实际预测变化面积返回唯一正最大原值/键。零/并列、不完整/重复/未知标签、最小/数量/密度/方向子集/具体地类/未知限定拒答。“显著”仅面积近似，格网属部署约定，尚无官网几何核验；不靠caption猜区域。公开4demo数值parity、GT小样例与真实路由HTTP8/8分别验证，不能等同官网提分。详见 `tasks/change/README.md`。
+当前任务标签为 `classification`、`presence`、`counting`、`visual_grounding`、`vqa`，仅执行单图请求。双图在任务路由和模型调用前以 `unsupported_image_count` 拒绝，经协议外壳返回 HTTP 500 `inference_failed`。单图 bbox 继续直接选择 `visual_grounding`，其余请求由 Qwen 仅选择 task；完整原题和现有单图执行器保持既有行为。
 
 默认私有诊断文件为 `${XDG_DATA_HOME:-$HOME/.local/share}/hfsa/prediction-diagnostics.jsonl`；可用 `HFSA_API_DIAGNOSTIC_FILE` 配置，显式空值关闭。每次记录UTC/PID/task/实际executor/固定reason/耗时及安全标识/既有数值诊断，不记录题干/选项/答案/坐标/头信息/凭据/异常文本；文件写入失败不影响预测，新POSIX文件0600。修复前评测缺少真实诊断，不把旧错误码当本轮根因。
 
-本轮合成回归API218/218、变化66/66，未重启生产或新提交官网。在原API终端沿用已export的Key，Ctrl+C后执行 `bash scripts/serve_hfsa_api.sh`，等待API listening再按原Key自行确认ready；不需要重启现有Ollama/ngrok。Git当前不可用且禁止重建，本地代码尚未推送。
-
-## 2026-10-11 预训练变化模型接入（ADR-0046，覆盖旧change拒绝说明）
-
-官方双图change现在调用独立Change-Agent MCI真实预训练模型；默认CPU/FP32、4线程、持久实例，模型包为工程`runs/change/mci`。共享HFSA和正式Q-Former VQA保持既有实现。全部1194个公开推理图state严格加载，官方942个额外fusion键仅按固定SHA及逐项审计白名单排除，不能任意strict=False加载。详见`tasks/change/README.md`和`reports/checkpoint_compatibility.json`。
-
-两图按原序A前/B后，要求同尺寸、同覆盖且已配准；模型不自动配准。question原字符串进入变化Predictor，通用Qwen router仍只选task。变化模块支持short_text/enum/single_choice，返回原值/原键；bbox/integer不支持。有限明确全图是否变化问法依据真实caption极性直接映射，具体事件或未知极性拒答，缺少提及不能当No。最大变化区域只接明确完整四象限/九格，由真实mask面积求唯一最大值；题意还须通过有限完整最大面积句法，最小/新增子集/计数拒答。其它描述/多类映射使用原本地Qwen，仅给caption，不给像素统计。mask只含道路/建筑变化，方向仅来自caption文字，不能当通用地类转移或物体计数；证据不足明确失败。
-
-公开接入验证脚本为`scripts/verify_change_api.py`，使用固定4对LEVIR-MCI test、随机内存Key/loopback端口，禁用请求捕获。含真实权重、本地Qwen与未缓存完整HTTP；GT只计分。结果以`runs/change/mci/reports/public_api_verification.json`为准，不代表官网分数或完整基准。
-
-2026-10-11最终passed：250项合成测试、22真实验证门全部通过；22次HTTP包含预期拒答/鉴权/资产失败边界。固定4对binary4/4、A/A=No；未缓存完整视觉+Qwen HTTP200耗1.3474s，CPU视觉.21094s，验证进程峰值RSS约1.489GiB。只核验公开小集和当前接口，未运行生产factory重启或官网评测；反向时序caption有误，具体事件/方向能力有限。
-
-运行中的9001不会自动更新。在原API终端Ctrl+C后执行以下命令，复用该终端已经export的原Key和现有Ollama/ngrok：
+运行中的9001不会自动更新，本次没有启停 API、Ollama 或 ngrok。用户在原 API 终端沿用已经 export 的 Key，Ctrl+C 后执行以下命令才会载入删除后的代码：
 
 ```bash
 cd /mnt/d/code/python/HFSA/提交/HFSA-main
 bash scripts/serve_hfsa_api.sh
 ```
 
-脚本默认`HFSA_CHANGE_DEVICE=cpu`和`HFSA_CHANGE_BUNDLE_DIR=runs/change/mci`，保持正式Q-Former目录。必须等启动输出`API listening`后才能视为新服务已监听；本轮助手没有重启生产或读取原进程凭据。
+等待启动输出 `API listening` 后再自行确认 ready。更早的变化能力决定见根目录 ADR-0046/0047，现已由 ADR-0048 撤销；下文带日期的旧实现记录仅作历史，以本节为准。
 
 ## 定位专项公开诊断与坐标修复（2026-10-11）
 
@@ -184,7 +172,7 @@ Ollama 仍只选 `task`。Adapter 将 `question` 原字符串传到 native task�
     ...
 ```
 
-网站的单题请求**不传图片字节、图片 URL、原始文件路径或金标**；只发 `asset_id`、SHA-256、MIME 类型。服务从本地 `assets/` 取图并核验哈希。双时相题按请求 `images` 数组顺序送入模型。开发包的 `dataset_id` 应为 `rsu-dev100-v2`；正式包可能是另一编号，API 从本地 `manifest.json` 自动读取，不应硬编码开发编号。以组委会最终发布的包和校验值为准。
+网站的单题请求**不传图片字节、图片 URL、原始文件路径或金标**；只发 `asset_id`、SHA-256、MIME 类型。服务从本地 `assets/` 取图并核验哈希。协议允许双时相请求按 `images` 原序携带前后两图；当前 HFSA 执行器已取消双图支持，会明确拒绝。开发包的 `dataset_id` 应为 `rsu-dev100-v2`；正式包可能是另一编号，API 从本地 `manifest.json` 自动读取，不应硬编码开发编号。以组委会最终发布的包和校验值为准。
 
 ## 2. 文件说明
 

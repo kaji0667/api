@@ -11,14 +11,13 @@ import urllib.request
 from copy import deepcopy
 from typing import Any
 
-TASKS = ("classification", "presence", "counting", "visual_grounding", "change", "vqa")
+TASKS = ("classification", "presence", "counting", "visual_grounding", "vqa")
 TASK_FORMATS = {
     "classification": frozenset({"short_text", "enum", "single_choice"}),
     "presence": frozenset({"short_text", "enum", "single_choice"}),
     "counting": frozenset({"integer", "short_text", "enum", "single_choice"}),
     "visual_grounding": frozenset({"bbox"}),
     "vqa": frozenset({"short_text", "enum", "single_choice"}),
-    "change": frozenset({"short_text", "enum", "single_choice"}),
 }
 SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -40,10 +39,9 @@ visual_grounding: localize a described target with a pixel bounding box.
 This task is allowed ONLY when response_constraint.type is bbox. A question
 asking for a location, direction, or spatial relationship in words or an option
 is vqa. Never turn a verbal spatial answer into a bounding box.
-change: compare earlier/later images or describe a temporal change.
 vqa: object identity, color, attributes, comparisons, descriptions, other QA.
 Single-choice is not automatically classification; Yes/No is not automatically
-presence. Two-image non-temporal reasoning is vqa. change_region is change.
+presence. Only single-image tasks are supported.
 Return only JSON with the single key task. Do not extract a target, generate
 conditions, translate, summarize or rewrite any input text. The source question
 will be passed directly to the selected text-guided predictor by the API.
@@ -82,7 +80,7 @@ def schema_for_request(request: dict[str, Any]) -> dict[str, Any]:
         raise RouterError("router_invalid_image_count")
     allowed = [task for task in TASKS
                if (task not in TASK_FORMATS or kind in TASK_FORMATS[task])
-               and (image_count == 1 or task in {"change", "vqa"})]
+               and image_count == 1]
     if not allowed:
         raise RouterError("router_no_compatible_executor")
     schema = deepcopy(SCHEMA)
@@ -171,7 +169,6 @@ def self_test() -> None:
         ("What color is the roof?", "short_text", "vqa", 1),
         ("Which object is shown: A ship or an airplane?", "single_choice", "vqa", 1),
         ("Is the airplane red? Answer Yes or No.", "enum", "vqa", 1),
-        ("What changed between the earlier and later images?", "enum", "change", 2),
         ("How many ships are in the lower left, except those near the bridge?", "integer", "counting", 1),
     ]
     for index, (question, kind, expected, image_count) in enumerate(cases, 1):
