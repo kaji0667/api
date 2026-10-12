@@ -12,7 +12,7 @@
   "lr": 0.001,
   "weight_decay": 0.0001,
   "patience": 4,
-  "min_answer_count": 2,
+  "min_answer_count": 1,
   "workers": 0,
   "type_loss_weight": 0.5,
   "augmentation": "none",

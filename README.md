@@ -47,6 +47,8 @@ Web 单图推理不需要完整数据集。VRSBench、DIOR-RSVG 和 RRSIS-D 原�
 
 ## 5. 独立视觉问答第一阶段
 
+当前接入队友十二类 Q-Former v2，使用 `runs/vqa/qformer/`，模型、归一与词表一起验收，不回退旧五头包。交付公开val复算53.797604%，本机验收和限制见 [合并记录](tasks/vqa/TEAM_V3_MERGE.md)。以下为旧五头历史记录，不代表当前支持范围。
+
 问答代码位于 `tasks/vqa/`，主模型权重、配置、真实验证结果及公开样例位于 `runs/vqa/stage1/`；独立仅问题/仅图像基线分别位于 `runs/vqa/question_only/`、`runs/vqa/image_only/`。支持类别、颜色、形状、存在和场景五类答案；旧版已接入官方API的vqa分支，Web保持原状。
 
 从本工程根目录运行 `python scripts/verify_vqa_examples.py --device cuda:0` 可核验20条实际样例输出。默认使用同级 `HFSA_models/` 的团队 YOLO/OpenCLIP 权重；可通过 CLI 指定其它资产路径。训练、评估及 `VQAPredictor` 用法见 [VQA 说明](tasks/vqa/README_INTEGRATION.txt)。本机沿用已有 `hfsa_env`，无需为此模块另建环境。

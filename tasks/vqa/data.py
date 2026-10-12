@@ -12,10 +12,33 @@ import zipfile
 from PIL import Image
 from .config import SUPPORTED, TYPES, resolve_path, write_json, sha256
 
+_WORD2NUM = {
+    "zero":"0","one":"1","two":"2","three":"3","four":"4","five":"5",
+    "six":"6","seven":"7","eight":"8","nine":"9","ten":"10",
+    "eleven":"11","twelve":"12","thirteen":"13","fourteen":"14","fifteen":"15",
+    "sixteen":"16","seventeen":"17","eighteen":"18","nineteen":"19","twenty":"20",
+}
+
+def _singularize(word):
+    if len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
+        if word.endswith(("ous","is","us")):
+            return word
+        if word[-3:] in ("ses","xes","zes","ches","shes"):
+            return word[:-2]
+        return word[:-1]
+    return word
+
 def normalize_answer(answer: str) -> str:
     s = " ".join(str(answer).lower().strip().split()).strip(".?!")
     s = re.sub(r"\bgrey\b", "gray", s)
-    return s
+    s = re.sub(r"^the\s+", "", s)
+    s = s.replace("-", " ")
+    for word, num in _WORD2NUM.items():
+        s = re.sub(rf"\b{word}\b", num, s)
+    s = re.sub(r"\bsemi\s+", "semi", s)
+    words = s.split()
+    words = [_singularize(w) for w in words]
+    return " ".join(words)
 
 def comparison_intent(question: str) -> bool:
     """Distinguish a requested comparison from an object-size qualifier."""
@@ -62,6 +85,7 @@ def read_rows(path):
                 if key not in row: raise ValueError(f"Missing {key} at line {n}")
             if not isinstance(row["question"], str) or not row["question"].strip(): raise ValueError("Empty question")
             if row["question_type"] not in TYPES: raise ValueError("Unknown type")
+            row["normalized_answer"] = normalize_answer(row.get("answer", row["normalized_answer"]))
             raw_path = row["image_path"]
             if raw_path not in resolved_images:
                 image_path=raw_path
@@ -87,7 +111,7 @@ def build_labels(rows, min_count=2):
             aliases[t][normalize_answer(row["answer"])] = row["normalized_answer"]
     return dict(types=list(TYPES), supported=list(SUPPORTED), answers=answers, aliases=aliases,
                 counts={t:dict(c) for t,c in counters.items()}, min_answer_count=min_count,
-                normalization="lowercase/whitespace/trailing .?!/grey->gray; multi-color preserved")
+                normalization="lowercase/whitespace/trailing .?!/grey->gray; strip leading 'the'; hyphen->space; word->digit(0-20); semi- merge; conservative singularize; multi-color preserved")
 
 def assert_split_isolation(train, val):
     evidence = {}

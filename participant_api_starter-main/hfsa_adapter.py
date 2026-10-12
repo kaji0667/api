@@ -484,7 +484,9 @@ class HFSAAdapter:
                 raise AdapterFailure("invalid_vqa_result", "Invalid VQA failure output")
             raise AdapterFailure("vqa_" + reason, "Trained VQA cannot answer this request")
         answer = result.get("answer")
-        if (result.get("question_type") not in {"category", "color", "shape", "existence", "scene"}
+        from tasks.vqa.config import SUPPORTED
+
+        if (result.get("question_type") not in SUPPORTED
                 or not isinstance(answer, str) or not answer.strip() or len(answer) > 4096):
             raise AdapterFailure("invalid_vqa_result", "Invalid VQA answer")
         if kind in {"single_choice", "enum"}:

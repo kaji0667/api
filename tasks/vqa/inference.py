@@ -7,7 +7,7 @@ import re
 import threading
 import torch
 from .config import ARCHITECTURE_IDS, FORMAT_VERSION, SUPPORTED, architecture_id, read_json, resolve_device, resolve_path, sha256
-from .data import normalize_answer,comparison_intent
+from .data import normalize_answer
 from .model import FrozenText, FrozenVisual, VQAHead
 
 def validate_modes(choices, allowed_answers):
@@ -22,9 +22,6 @@ def validate_modes(choices, allowed_answers):
 def scope_guard(question):
     q=question.lower()
     if re.search(r"[\u4e00-\u9fff]",q):return "other","unsupported_language"
-    if re.search(r"\b(how many|number of|count the|count all)\b",q):return "quantity","unsupported_task"
-    if comparison_intent(question):return "comparison","unsupported_task"
-    if re.search(r"\b(where|which direction|what direction|what position|which position)\b",q):return "position","unsupported_task"
     if re.search(r"\b(before and after|two images|second image|what has changed)\b",q):return "other","unsupported_task"
     return None
 
@@ -72,6 +69,8 @@ def load_bundle(bundle_dir,asset_paths):
     root=resolve_path(bundle_dir);manifest=read_json(root/"manifest.json")
     if manifest.get("format_version") != FORMAT_VERSION or manifest.get("architecture_id") not in ARCHITECTURE_IDS:
         raise ValueError("Incompatible VQA bundle architecture/version")
+    if manifest.get("supported_question_types") != list(SUPPORTED):
+        raise ValueError("Incompatible VQA supported question types; twelve answer heads are required")
     for rel,digest in manifest["file_sha256"].items():
         p=resolve_path(rel,root)
         if not p.is_relative_to(root):raise ValueError("Unsafe bundle file path")
@@ -89,6 +88,9 @@ def load_bundle(bundle_dir,asset_paths):
     if manifest["architecture_id"] != architecture_id(config):
         raise ValueError("VQA architecture does not match fusion configuration")
     labels=read_json(root/manifest["configs"]["labels"])
+    if (labels.get("types") != list(SUPPORTED) or labels.get("supported") != list(SUPPORTED)
+            or not isinstance(labels.get("answers"),dict) or set(labels["answers"]) != set(SUPPORTED)):
+        raise ValueError("Incompatible VQA supported question types in answer labels")
     payload=torch.load(root/manifest["checkpoint"]["path"],map_location="cpu",weights_only=True)
     if payload.get("format_version") != FORMAT_VERSION or payload.get("architecture_id") != manifest["architecture_id"] or payload.get("labels") != labels or payload.get("config") != config:
         raise ValueError("Checkpoint metadata/config/labels mismatch")

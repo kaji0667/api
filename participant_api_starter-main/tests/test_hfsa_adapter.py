@@ -191,7 +191,7 @@ class AdapterTests(unittest.TestCase):
     def test_vqa_checks_actual_answer_and_allowed_contract(self):
         self.select("vqa")
         for result in (None, {"status": "ok", "answer": None, "question_type": "color"},
-                       {"status": "ok", "answer": "left", "question_type": "position"},
+                       {"status": "ok", "answer": "left", "question_type": "untrained_type"},
                        {"status": "unsupported", "reason": "private question content"}):
             with self.subTest(result=result), self.assertRaises(AdapterFailure) as raised:
                 self.vqa.predict.return_value = result
@@ -204,6 +204,21 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(AdapterFailure) as raised:
             self.predict(request(constraint={"min_length": 10}))
         self.assertEqual(raised.exception.code, "vqa_answer_contract")
+
+    def test_vqa_accepts_all_trained_answer_types_and_preserves_choice_keys(self):
+        from tasks.vqa.config import SUPPORTED
+
+        self.select("vqa")
+        for question_type in SUPPORTED:
+            with self.subTest(question_type=question_type):
+                self.vqa.predict.return_value = {
+                    "status": "ok", "answer": "original-key", "question_type": question_type,
+                }
+                value = request(kind="single_choice", choices={"original-key": "a trained answer"},
+                                constraint={"values": ["original-key"]})
+                self.assertEqual(self.predict(value), "original-key")
+        self.classification.predict.assert_not_called()
+        self.counting.predict.assert_not_called()
 
     def test_vqa_ambiguous_or_invalid_options_are_not_guessed(self):
         self.select("vqa")
