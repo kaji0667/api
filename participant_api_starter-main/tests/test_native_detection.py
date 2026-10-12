@@ -255,6 +255,68 @@ class NativeDetectionTests(unittest.TestCase):
                 NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder, spatial_weight=weight)
         self.backend_factory.assert_not_called()
 
+    def test_candidate_threshold_rejects_invalid_values_before_backend_loading(self):
+        self.backend_factory.reset_mock()
+        for value in (0, 1, -.1, 1.01, float("nan"), float("inf"), True, "0.25", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder, candidate_confidence=value)
+        self.backend_factory.assert_not_called()
+        with self.assertRaises(ValueError):
+            self.native.candidate_confidence = False
+        self.assertEqual(self.native.candidate_confidence, .25)
+
+    def test_explicit_default_threshold_has_identical_predictions_and_nms(self):
+        default = self.native.predict(self.image, self.question, return_phrase_scores=True)
+        explicit = NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder,
+                                   spatial_weight=0, candidate_confidence=.25)
+        other = explicit.predict(self.image, self.question, return_phrase_scores=True)
+        self.assertEqual(default.grounding_index, other.grounding_index)
+        np.testing.assert_array_equal(default.boxes, other.boxes)
+        np.testing.assert_array_equal(default.phrase_scores, other.phrase_scores)
+        np.testing.assert_array_equal(default.scores, other.scores)
+        self.assertEqual(self.nms.call_args.kwargs, {
+            "conf_thres": .25, "iou_thres": .7, "multi_label": False, "agnostic": True, "max_det": 300,
+        })
+
+    def test_real_nms_three_thresholds_use_fresh_forwards_and_preserve_shared_geometry(self):
+        from ultralytics.utils.ops import non_max_suppression as real_nms
+        raw = torch.tensor([[[150., 350., 650.], [150., 350., 650.],
+                             [100., 100., 100.], [100., 100., 100.], [.30, .15, .07]]])
+        self.model.side_effect = lambda *args, **kwargs: raw.clone()
+        self.nms.side_effect = real_nms
+        results = []
+        original_model, original_encoder = self.native.model, self.native.encoder
+        with patch.dict("os.environ", {"HFSA_API_DIAGNOSTICS": "1"}):
+            for threshold, expected_count in ((.25, 1), (.10, 2), (.05, 3)):
+                self.native.candidate_confidence = threshold
+                result = self.native.predict(self.image, self.question, return_phrase_scores=True)
+                results.append(result)
+                self.assertEqual(result.detection_count, expected_count)
+                self.assertEqual(result.diagnostics["pre_nms_above_threshold"], expected_count)
+                self.assertEqual(result.diagnostics["confidence_threshold"], threshold)
+                self.assertEqual(result.diagnostics["nms_candidate_count"], expected_count)
+                self.assertEqual(self.nms.call_args.kwargs["conf_thres"], threshold)
+                self.assertIs(self.native.model, original_model)
+                self.assertIs(self.native.encoder, original_encoder)
+        self.assertEqual(self.model.call_count, 3)
+        self.assertEqual(float(raw[0, 0, 0]), 150.)  # NMS in-place conversion never contaminated the source.
+        np.testing.assert_allclose(results[2].boxes, [[8.4, 8.4, 18.4, 18.4],
+                                                   [28.4, 28.4, 38.4, 38.4], [58.4, 58.4, 68.4, 68.4]], atol=1e-5)
+        for result in results[:2]:
+            np.testing.assert_array_equal(result.boxes, results[2].boxes[:len(result.boxes)])
+            np.testing.assert_array_equal(result.phrase_scores, results[2].phrase_scores[:len(result.boxes)])
+
+    def test_custom_threshold_diagnostic_matches_empty_candidate_pool(self):
+        self.native.candidate_confidence = .10
+        self.model.return_value = torch.tensor([[[1., 2.], [1., 2.], [1., 1.], [1., 1.], [.07, .09]]])
+        self.nms.return_value = [torch.empty((0, 6))]
+        with patch.dict("os.environ", {"HFSA_API_DIAGNOSTICS": "1"}):
+            result = self.native.predict(self.image, self.question, return_phrase_scores=True)
+        self.assertEqual(result.diagnostics["confidence_threshold"], .10)
+        self.assertEqual(result.diagnostics["pre_nms_above_threshold"], 0)
+        self.assertEqual(self.nms.call_args.kwargs["conf_thres"], .10)
+        self.assertEqual(result.detection_count, 0)
+
     def test_opt_in_diagnostic_observes_below_threshold_candidates_without_changing_nms(self):
         raw = torch.zeros((1, 5, 2))
         raw[0, 4] = torch.tensor([.10, .24])

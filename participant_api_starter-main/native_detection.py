@@ -130,7 +130,7 @@ class NativeDetection:
 
     def __init__(self, checkpoint: str | Path, device: str | torch.device = "auto",
                  encoder: NativeTextEncoder | None = None, *, max_image_size: int = 800,
-                 spatial_weight: float = .15) -> None:
+                 spatial_weight: float = .15, candidate_confidence: float = .25) -> None:
         if type(max_image_size) is not int or max_image_size < 800 or max_image_size % 32:
             raise ValueError("Detection max_image_size must be a multiple of 32, at least 800")
         self.max_image_size = max_image_size
@@ -138,6 +138,7 @@ class NativeDetection:
                 or not math.isfinite(spatial_weight) or not 0 <= spatial_weight <= 1):
             raise ValueError("spatial_weight must be a finite number between 0 and 1")
         self.spatial_weight = float(spatial_weight)
+        self.candidate_confidence = candidate_confidence
         self.checkpoint = Path(checkpoint).expanduser().resolve()
         if not self.checkpoint.is_file():
             raise FileNotFoundError("Native detection checkpoint is missing")
@@ -151,6 +152,17 @@ class NativeDetection:
         self.model = self.backend.model
         self.model.eval()
         self.encoder = encoder if encoder is not None else NativeTextEncoder(device=self.device)
+
+    @property
+    def candidate_confidence(self) -> float:
+        return self._candidate_confidence
+
+    @candidate_confidence.setter
+    def candidate_confidence(self, value: float) -> None:
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 0 < value < 1):
+            raise ValueError("candidate_confidence must be a finite number strictly between 0 and 1")
+        self._candidate_confidence = float(value)
 
     @staticmethod
     def _image(image: Image.Image | str | Path | np.ndarray) -> np.ndarray:
@@ -301,6 +313,7 @@ class NativeDetection:
         if type(return_phrase_scores) is not bool:
             raise TaskInputError("invalid_detection_matching", "return_phrase_scores must be boolean")
         description = sanitize_text(detection_text(original_question), empty_placeholder="")
+        candidate_confidence = self.candidate_confidence
         # One description is one object-aligned row, not sentence fragments or
         # a fabricated collection of other objects from the unseen test labels.
         vectors = self.encoder.encode_descriptions([description])
@@ -326,7 +339,7 @@ class NativeDetection:
             if os.environ.get("HFSA_API_DIAGNOSTICS") == "1":
                 prediction = raw[0] if isinstance(raw, (tuple, list)) else raw
                 # Detection checkpoints expose [batch, xywh+class, anchors].
-                # Observe confidence before NMS; do not change its threshold.
+                # Observe the same confidence threshold that NMS will apply.
                 if (isinstance(prediction, torch.Tensor) and prediction.ndim == 3
                         and prediction.shape[0] == 1 and prediction.shape[1] >= 5
                         and prediction.shape[2] > 0):
@@ -335,12 +348,12 @@ class NativeDetection:
                         diagnostic = {
                             "original_hw": list(original.shape[:2]),
                             "input_hw": list(tensor.shape[2:]),
-                            "confidence_threshold": .25,
+                            "confidence_threshold": candidate_confidence,
                             "raw_anchor_count": int(confidence.numel()),
                             "max_confidence": float(confidence.max()),
-                            "pre_nms_above_threshold": int((confidence > .25).sum()),
+                            "pre_nms_above_threshold": int((confidence > candidate_confidence).sum()),
                         }
-            detections = non_max_suppression(raw, conf_thres=.25, iou_thres=.7,
+            detections = non_max_suppression(raw, conf_thres=candidate_confidence, iou_thres=.7,
                                             multi_label=False, agnostic=True, max_det=300)[0]
             if (not isinstance(detections, torch.Tensor) or detections.ndim != 2
                     or detections.shape[1] < 5 or not torch.isfinite(detections).all()):
