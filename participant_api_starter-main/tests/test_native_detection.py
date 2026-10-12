@@ -14,6 +14,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_task_text import TaskInputError
 from native_detection import NativeDetection, NativeTextEncoder
+from text_encoder.matching import assign_by_score_matrix
 from ultralytics.data.augment import LetterBox
 from ultralytics.data.base import BaseDataset
 
@@ -157,6 +158,42 @@ class NativeDetectionTests(unittest.TestCase):
         self.native = NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder, spatial_weight=0)
         self.image = Image.new("RGB", (80, 80), (64, 128, 192))
         self.question = "Synthetic official source question with protocol packaging."
+
+    def test_same_forward_adjusted_scores_are_captured_before_assignment(self):
+        self.native.spatial_weight = .15
+        self.task_text.return_value = "The lawn in the bottom-right corner"
+        raw_scores = torch.tensor([[1.02, 1.]], dtype=torch.float32)
+        with patch("native_detection.score_matrix_from_phrase_maps", return_value=raw_scores), \
+                patch("native_detection.assign_by_score_matrix", wraps=assign_by_score_matrix) as assignment:
+            result = self.native.predict(self.image, self.question, return_phrase_scores=True)
+        np.testing.assert_array_equal(result.phrase_scores, raw_scores[0].numpy())
+        actual_assignment_scores = assignment.call_args.args[0][0].numpy()
+        np.testing.assert_array_equal(result.baseline_adjusted_scores, actual_assignment_scores)
+        self.assertEqual(result.baseline_adjusted_scores.dtype, np.float32)
+        self.assertFalse(np.array_equal(result.phrase_scores, result.baseline_adjusted_scores))
+        self.assertEqual(result.grounding_index, 1)
+        self.model.assert_called_once()
+
+    def test_adjusted_scores_are_optional_and_presence_never_applies_position(self):
+        self.native.spatial_weight = .15
+        self.task_text.return_value = "The lawn in the bottom-right corner"
+        self.assertIsNone(self.native.predict(self.image, self.question).baseline_adjusted_scores)
+        with patch("native_detection.parse_absolute_position") as parse:
+            result = self.native.predict(self.image, self.question, require_grounding=False,
+                                         return_phrase_scores=True)
+        parse.assert_not_called()
+        self.assertIsNone(result.baseline_adjusted_scores)
+        self.assertIsNotNone(result.phrase_scores)
+        self.assertIsNone(result.grounding_index)
+
+    def test_empty_candidate_same_forward_score_arrays_have_matching_float32_shape(self):
+        self.nms.return_value = [torch.empty((0, 6))]
+        result = self.native.predict(self.image, self.question, return_phrase_scores=True)
+        for scores in (result.phrase_scores, result.baseline_adjusted_scores):
+            self.assertEqual(scores.shape, (0,))
+            self.assertEqual(scores.dtype, np.float32)
+        self.assertIsNone(result.grounding_index)
+
 
     def test_semantic_phrase_assignment_selects_lower_confidence_candidate(self):
         result = self.native.predict(self.image, self.question)

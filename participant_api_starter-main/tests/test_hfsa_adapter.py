@@ -572,6 +572,88 @@ class AdapterTests(unittest.TestCase):
         self.assert_no_predictors_called()
 
 
+class BBoxPolicyAdapterTests(unittest.TestCase):
+    setUp = AdapterTests.setUp
+    select = AdapterTests.select
+    predict = AdapterTests.predict
+
+    def guarded(self):
+        executor = Mock()
+        executor.predict.return_value = self.detection.predict.return_value
+        self.adapter = HFSAAdapter(
+            self.classification, self.detection, self.counting, self.refseg, vqa=self.vqa,
+            grounding_policy="clip_guarded", grounding_executor=executor,
+        )
+        return executor
+
+    def test_guarded_bbox_calls_task_with_original_multiline_question(self):
+        executor = self.guarded()
+        self.select("visual_grounding")
+        question = "Description:\nThe lower-left lawn\nA road is to the right of it\nReturn a bbox."
+        result = self.predict(request(question, "bbox", image_height=40, image_width=80))
+        self.assertEqual(result, [30, 20, 71, 36])
+        executor.predict.assert_called_once_with(self.image, question)
+        self.detection.predict.assert_not_called()
+        self.refseg.predict.assert_not_called()
+
+    def test_guarded_presence_still_uses_original_native_call(self):
+        executor = self.guarded()
+        self.select("presence")
+        question = "Is there a ship in the lower-left corner?"
+        self.assertEqual(self.predict(request(question, "enum", constraint={"values": ["Yes", "No"]})), "Yes")
+        self.detection.predict.assert_called_once_with(self.image, question, require_grounding=False)
+        executor.predict.assert_not_called()
+
+    def test_constructor_rejects_policy_executor_and_backend_mismatch(self):
+        for fields in (
+            {"grounding_policy": "unknown"},
+            {"grounding_policy": "clip_guarded"},
+            {"grounding_policy": "native", "grounding_executor": Mock()},
+            {"grounding_backend": "refseg", "grounding_policy": "clip_guarded", "grounding_executor": Mock()},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                HFSAAdapter(self.classification, self.detection, self.counting, self.refseg, **fields)
+
+    def test_guarded_diagnostic_emits_only_fixed_values_and_numeric_allowlist(self):
+        executor = self.guarded()
+        self.select("visual_grounding")
+        safe = {
+            "grounding_policy": "clip_guarded", "grounding_parse_status": "parsed",
+            "grounding_outcome": "native_fallback", "grounding_reason": "grounding_crop_failed",
+            "grounding_reference_count": 2, "grounding_candidate_count": 2,
+            "grounding_crop_count": 0, "grounding_elapsed_ms": 123,
+        }
+        executor.predict.return_value.diagnostics = {
+            **safe, "original_description": "private-description", "crop_scores": "private-scores",
+            "selected_box": [1, 2, 3, 4], "raw_exception": "private-exception",
+        }
+        output = io.StringIO()
+        with redirect_stderr(output):
+            self.predict(request("private-question", "bbox", image_height=40, image_width=80))
+        record = json.loads(output.getvalue())
+        self.assertEqual(record["executor"], "detection")
+        self.assertEqual(record["detection_inference"], safe)
+        for secret in ("private-description", "private-question", "private-scores", "private-exception", "selected_box"):
+            self.assertNotIn(secret, output.getvalue())
+
+    def test_guarded_diagnostic_rejects_free_text_invalid_enums_and_non_count_values(self):
+        executor = self.guarded()
+        self.select("visual_grounding")
+        executor.predict.return_value.diagnostics = {
+            "grounding_policy": "private-policy", "grounding_parse_status": "private-description",
+            "grounding_outcome": "private-outcome", "grounding_reason": "private-exception",
+            "grounding_reference_count": True, "grounding_candidate_count": -1,
+            "grounding_crop_count": float("nan"), "grounding_elapsed_ms": "123",
+        }
+        output = io.StringIO()
+        with redirect_stderr(output):
+            self.predict(request("private-question", "bbox", image_height=40, image_width=80))
+        record = json.loads(output.getvalue())
+        self.assertNotIn("detection_inference", record)
+        self.assertNotIn("private-", output.getvalue())
+
+
+
 class DiagnosticTests(unittest.TestCase):
     setUp = AdapterTests.setUp
     select = AdapterTests.select
@@ -792,7 +874,8 @@ class LoadingBoundaryTests(unittest.TestCase):
             if name == "tasks.change" or name.startswith("tasks.change."):
                 raise AssertionError("Removed temporal models must not be imported")
             if name in {"native_refseg", "tasks.refseg.inference", "tasks.routing.adapters.refseg",
-                        "tasks.classification.inference", "tasks.detection.inference", "tasks.counting.inference"}:
+                        "tasks.classification.inference", "tasks.detection.inference", "tasks.counting.inference",
+                        "tasks.detection.bbox_grounding", "tasks.detection.crop_identity"}:
                 raise AssertionError("Native factories must not import a Web Predictor")
             return real_import(name, *args, **kwargs)
 
@@ -803,6 +886,8 @@ class LoadingBoundaryTests(unittest.TestCase):
                     with patch("builtins.__import__", side_effect=guard_import), redirect_stdout(io.StringIO()):
                         adapter = HFSAAdapter.from_local()
         self.assertEqual(adapter.grounding_backend, "detection")
+        self.assertEqual(adapter.grounding_policy, "native")
+        self.assertIsNone(adapter.grounding_executor)
         self.assertIsNone(adapter.refseg)
         ready.assert_called_once_with()
         factories["refseg"].assert_not_called()
@@ -873,6 +958,72 @@ class LoadingBoundaryTests(unittest.TestCase):
                         HFSAAdapter.from_local()
                 ready.assert_not_called()
                 is_file.assert_not_called()
+
+
+    def fake_grounding_modules(self):
+        modules, factories = self.fake_predictor_modules()
+        factories["scorer"] = Mock()
+        factories["grounding"] = Mock()
+        for name, attribute, factory in (
+            ("tasks.detection.crop_identity", "FrozenCLIPCropScorer", factories["scorer"]),
+            ("tasks.detection.bbox_grounding", "BBoxGroundingExecutor", factories["grounding"]),
+        ):
+            module = ModuleType(name)
+            setattr(module, attribute, factory)
+            modules[name] = module
+        return modules, factories
+
+    def test_guarded_loading_reuses_exact_shared_clip_and_prepares_task_immediately(self):
+        from api_task_text import detection_text
+        modules, factories = self.fake_grounding_modules()
+        with patch.dict(os.environ, {"HFSA_API_DEVICE": "cpu", "HFSA_GROUNDING_POLICY": "clip_guarded"}, clear=True), \
+                patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
+                patch("hfsa_adapter.validate_api_vqa_bundle"), patch("hfsa_adapter.Path.is_file", return_value=True), \
+                redirect_stdout(io.StringIO()):
+            adapter = HFSAAdapter.from_local()
+        encoder = factories["encoder"].return_value
+        detection = factories["detection"].return_value
+        factories["encoder"].assert_called_once()
+        factories["scorer"].assert_called_once_with(encoder.encoder.model, encoder.encode_descriptions)
+        factories["grounding"].assert_called_once_with(
+            detection, factories["scorer"].return_value,
+            description_extractor=detection_text, image_converter=detection._image,
+        )
+        self.assertEqual(factories["detection"].call_args.kwargs["candidate_confidence"], .25)
+        self.assertEqual(adapter.grounding_policy, "clip_guarded")
+        self.assertIs(adapter.grounding_executor, factories["grounding"].return_value)
+        self.assertEqual(adapter.grounding_backend, "detection")
+
+    def test_invalid_policy_and_guarded_configuration_fail_before_router_or_weights(self):
+        configurations = [{"HFSA_GROUNDING_POLICY": value} for value in ("", "clip", "unknown")]
+        configurations += [
+            {"HFSA_GROUNDING_POLICY": "clip_guarded", "HFSA_GROUNDING_BACKEND": "refseg"},
+            {"HFSA_GROUNDING_POLICY": "clip_guarded", "HFSA_GROUNDING_SPATIAL_WEIGHT": "0"},
+            {"HFSA_GROUNDING_POLICY": "clip_guarded", "HFSA_GROUNDING_SPATIAL_WEIGHT": "0.1501"},
+        ]
+        for configuration in configurations:
+            with self.subTest(configuration=configuration), patch.dict(os.environ, configuration, clear=True), \
+                    patch("hfsa_adapter.ensure_router_ready") as ready, patch("hfsa_adapter.Path.is_file") as is_file:
+                with self.assertRaises(ValueError):
+                    HFSAAdapter.from_local()
+                ready.assert_not_called()
+                is_file.assert_not_called()
+
+    def test_guarded_scorer_initialization_failure_prevents_readiness_and_no_native_fallback(self):
+        modules, factories = self.fake_grounding_modules()
+        error = ValueError("frozen CLIP validation failed")
+        factories["scorer"].side_effect = error
+        with patch.dict(os.environ, {"HFSA_GROUNDING_POLICY": "clip_guarded"}, clear=True), \
+                patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
+                patch("hfsa_adapter.validate_api_vqa_bundle"), patch("hfsa_adapter.Path.is_file", return_value=True), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(ValueError) as context:
+                HFSAAdapter.from_local()
+        self.assertIs(context.exception, error)
+        factories["grounding"].assert_not_called()
+        factories["counting"].assert_not_called()
+        factories["vqa"].assert_not_called()
+
 
 
 if __name__ == "__main__":

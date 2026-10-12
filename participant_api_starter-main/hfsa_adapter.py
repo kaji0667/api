@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from api_task_text import TaskInputError, count_option_matches
+from api_task_text import TaskInputError, count_option_matches, detection_text
 from ollama_router import TASKS, TASK_FORMATS, RouterError, ensure_router_ready, route_question, validate_plan
 
 
@@ -96,6 +96,9 @@ _DIAGNOSTIC_REASONS = frozenset({
     "vqa_not_configured", "vqa_invalid_options", "vqa_invalid_input", "invalid_vqa_result",
     "vqa_answer_contract", "vqa_unsupported_language", "vqa_unsupported_task",
     "vqa_choice_unmatched", "vqa_text_context_exceeded", "vqa_nonfinite_prediction",
+    "grounding_hybrid_selected", "grounding_unsupported_plan", "grounding_empty_candidates",
+    "grounding_missing_scores", "grounding_crop_failed", "grounding_rank_failed",
+    "grounding_invalid_selection",
 })
 _DIAGNOSTIC_ERROR_TYPES = frozenset({
     "AdapterFailure", "ValueError", "TypeError", "KeyError", "RuntimeError", "OSError",
@@ -219,6 +222,20 @@ def _prediction_diagnostic(request: dict[str, Any], image_count: int,
                 value = diagnostic.get(key)
                 if type(value) is int and value >= 0:
                     safe[key] = value
+            for key, allowed in (
+                ("grounding_policy", {"native", "clip_guarded"}),
+                ("grounding_parse_status", {"parsed", "unsupported"}),
+                ("grounding_outcome", {"hybrid_selected", "native_fallback"}),
+                ("grounding_reason", _DIAGNOSTIC_REASONS),
+            ):
+                value = diagnostic.get(key)
+                if isinstance(value, str) and value in allowed:
+                    safe[key] = value
+            for key in ("grounding_reference_count", "grounding_candidate_count",
+                        "grounding_crop_count", "grounding_elapsed_ms"):
+                value = diagnostic.get(key)
+                if type(value) is int and value >= 0:
+                    safe[key] = value
             if safe:
                 record["detection_inference"] = safe
     encoded = json.dumps(record, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
@@ -300,27 +317,43 @@ def validate_api_vqa_bundle(bundle_dir: str | Path) -> dict[str, Any]:
 
 class HFSAAdapter:
     def __init__(self, classification: Any, detection: Any, counting: Any, refseg: Any,
-                 *, grounding_backend: str = "detection", vqa: Any = None) -> None:
+                 *, grounding_backend: str = "detection", vqa: Any = None,
+                 grounding_policy: str = "native", grounding_executor: Any = None) -> None:
         if grounding_backend not in {"detection", "refseg"}:
             raise ValueError("Grounding backend must be detection or refseg")
+        if grounding_policy not in {"native", "clip_guarded"}:
+            raise ValueError("Grounding policy must be native or clip_guarded")
+        if grounding_policy == "clip_guarded" and grounding_backend != "detection":
+            raise ValueError("clip_guarded requires the detection grounding backend")
+        if (grounding_policy == "clip_guarded") != (grounding_executor is not None):
+            raise ValueError("clip_guarded requires an initialized bbox task executor")
         self.classification = classification
         self.detection = detection
         self.counting = counting
         self.refseg = refseg
         self.vqa = vqa
         self.grounding_backend = grounding_backend
+        self.grounding_policy = grounding_policy
+        self.grounding_executor = grounding_executor
 
     @classmethod
     def from_local(cls) -> HFSAAdapter:
         grounding_backend = os.environ.get("HFSA_GROUNDING_BACKEND", "detection").strip().lower()
         if grounding_backend not in {"detection", "refseg"}:
             raise ValueError("HFSA_GROUNDING_BACKEND must be detection or refseg")
+        grounding_policy = os.environ.get("HFSA_GROUNDING_POLICY", "native").strip().lower()
+        if grounding_policy not in {"native", "clip_guarded"}:
+            raise ValueError("HFSA_GROUNDING_POLICY must be native or clip_guarded")
+        if grounding_policy == "clip_guarded" and grounding_backend != "detection":
+            raise ValueError("clip_guarded requires HFSA_GROUNDING_BACKEND=detection")
         max_detection_size = int(os.environ.get("HFSA_DETECTION_MAX_IMGSZ", "1600"))
         if max_detection_size < 800 or max_detection_size % 32:
             raise ValueError("HFSA_DETECTION_MAX_IMGSZ must be a multiple of 32, at least 800")
         spatial_weight = float(os.environ.get("HFSA_GROUNDING_SPATIAL_WEIGHT", "0.15"))
         if not math.isfinite(spatial_weight) or not 0 <= spatial_weight <= 1:
             raise ValueError("HFSA_GROUNDING_SPATIAL_WEIGHT must be a finite number between 0 and 1")
+        if grounding_policy == "clip_guarded" and spatial_weight != .15:
+            raise ValueError("clip_guarded requires HFSA_GROUNDING_SPATIAL_WEIGHT=0.15")
         print("HFSA API: checking local Qwen text router", flush=True)
         ensure_router_ready()
         code_dir = Path(__file__).resolve().parents[1]
@@ -362,8 +395,17 @@ class HFSAAdapter:
         detection = NativeDetection(
             checkpoint=checkpoints["detection"], device=device, encoder=shared_encoder,
             max_image_size=max_detection_size,
-            spatial_weight=spatial_weight,
+            spatial_weight=spatial_weight, candidate_confidence=.25,
         )
+        grounding_executor = None
+        if grounding_policy == "clip_guarded":
+            from tasks.detection.bbox_grounding import BBoxGroundingExecutor
+            from tasks.detection.crop_identity import FrozenCLIPCropScorer
+
+            scorer = FrozenCLIPCropScorer(shared_encoder.encoder.model, shared_encoder.encode_descriptions)
+            grounding_executor = BBoxGroundingExecutor(
+                detection, scorer, description_extractor=detection_text, image_converter=detection._image,
+            )
         print("HFSA API: loading counting", flush=True)
         counting = NativeCounting(
             checkpoint=checkpoints["counting"], device=device, encoder=shared_encoder,
@@ -383,9 +425,10 @@ class HFSAAdapter:
                 checkpoint=checkpoints["refseg"], device=device,
                 model_yaml=str(code_dir / "ultralytics/cfg/models/v12/yolov12m-semseg.yaml"),
             )
-        print(f"HFSA API: bbox grounding backend={grounding_backend}", flush=True)
+        print(f"HFSA API: bbox grounding backend={grounding_backend} policy={grounding_policy}", flush=True)
         adapter = cls(classification, detection, counting, refseg,
-                      grounding_backend=grounding_backend, vqa=vqa)
+                      grounding_backend=grounding_backend, vqa=vqa,
+                      grounding_policy=grounding_policy, grounding_executor=grounding_executor)
         # Explicit local validation reuses the models about to serve requests.
         # It never loads a duplicate detector/CLIP or uses scoring annotations.
         if os.environ.get("HFSA_API_VERIFY_PARITY") == "1":
@@ -600,7 +643,8 @@ class HFSAAdapter:
         if self.grounding_backend == "detection":
             if execution_metadata is not None:
                 execution_metadata["executor"] = "detection"
-            result = self.detection.predict(image, model_text)
+            result = (self.grounding_executor.predict(image, model_text)
+                      if self.grounding_executor is not None else self.detection.predict(image, model_text))
             if execution_metadata is not None:
                 execution_metadata["detection_inference"] = getattr(result, "diagnostics", None)
             return self._detection_box(result, height, width)

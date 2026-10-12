@@ -119,6 +119,7 @@ class NativeDetectionResult:
     diagnostics: dict[str, Any] | None = None
     phrase_scores: np.ndarray | None = None
     extra_phrase_scores: np.ndarray | None = None
+    baseline_adjusted_scores: np.ndarray | None = None
 
     @property
     def detection_count(self) -> int:
@@ -309,6 +310,8 @@ class NativeDetection:
         External boxes are original-image xyxy coordinates. They and the local
         NMS candidates are scored in this forward's phrase maps, before the
         optional absolute-position bonus; external boxes never enter assignment.
+        Opt-in grounding scores also retain the adjusted float32 row immediately
+        before native assignment, without recomputing it in the task layer.
         """
         if type(return_phrase_scores) is not bool:
             raise TaskInputError("invalid_detection_matching", "return_phrase_scores must be boolean")
@@ -365,6 +368,8 @@ class NativeDetection:
                 boxes = self._restore_boxes(boxes, original.shape[:2], ratio_pad)
             selected = None
             phrase_scores = np.empty((0,), dtype=np.float32) if return_phrase_scores else None
+            baseline_adjusted_scores = (np.empty((0,), dtype=np.float32)
+                                        if return_phrase_scores and require_grounding else None)
             extra_phrase_scores = np.empty((0,), dtype=np.float32) if extra_input_boxes is not None else None
             extra_count = len(extra_input_boxes) if extra_input_boxes is not None else 0
             need_scores = require_grounding or return_phrase_scores or extra_count > 0
@@ -387,6 +392,8 @@ class NativeDetection:
                 score = score[:, :len(detections)]
             if require_grounding and len(detections):
                 score = self._position_adjusted_scores(score, boxes, original.shape[:2], description)
+                if return_phrase_scores:
+                    baseline_adjusted_scores = score[0].detach().cpu().numpy().astype(np.float32, copy=True)
                 rows, columns = assign_by_score_matrix(score, temperature=.7)
                 if rows.numel() != 1 or columns.numel() != 1 or int(rows[0]) != 0:
                     raise TaskInputError("invalid_detection_matching", "No unique description matching assignment")
@@ -400,4 +407,5 @@ class NativeDetection:
             grounding_index=selected, model_prompt=description,
             diagnostics=diagnostic, phrase_scores=phrase_scores,
             extra_phrase_scores=extra_phrase_scores,
+            baseline_adjusted_scores=baseline_adjusted_scores,
         )
