@@ -804,6 +804,7 @@ class LoadingBoundaryTests(unittest.TestCase):
         factories["encoder"].assert_called_once_with(device="cpu")
         self.assertIs(factories["detection"].call_args.kwargs["encoder"], factories["encoder"].return_value)
         self.assertEqual(factories["detection"].call_args.kwargs["max_image_size"], 1600)
+        self.assertEqual(factories["detection"].call_args.kwargs["spatial_weight"], .15)
         self.assertIs(factories["counting"].call_args.kwargs["encoder"], factories["encoder"].return_value)
 
     def test_explicit_refseg_loading_checks_and_constructs_refseg(self):
@@ -833,6 +834,25 @@ class LoadingBoundaryTests(unittest.TestCase):
     def test_invalid_detection_size_fails_before_router_or_weight_loading(self):
         for value in ("640", "801", "invalid"):
             with self.subTest(value=value), patch.dict(os.environ, {"HFSA_DETECTION_MAX_IMGSZ": value}):
+                with patch("hfsa_adapter.ensure_router_ready") as ready, patch("hfsa_adapter.Path.is_file") as is_file:
+                    with self.assertRaises(ValueError):
+                        HFSAAdapter.from_local()
+                ready.assert_not_called()
+                is_file.assert_not_called()
+
+
+    def test_zero_spatial_weight_is_forwarded_to_native_detection(self):
+        modules, factories = self.fake_predictor_modules()
+        with patch.dict(os.environ, {"HFSA_GROUNDING_SPATIAL_WEIGHT": "0"}, clear=True), \
+                patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
+                patch("hfsa_adapter.validate_api_vqa_bundle"), \
+                patch("hfsa_adapter.Path.is_file", return_value=True), redirect_stdout(io.StringIO()):
+            HFSAAdapter.from_local()
+        self.assertEqual(factories["detection"].call_args.kwargs["spatial_weight"], 0)
+
+    def test_invalid_spatial_weight_fails_before_router_or_weight_loading(self):
+        for value in ("-0.1", "1.01", "nan", "inf", "invalid"):
+            with self.subTest(value=value), patch.dict(os.environ, {"HFSA_GROUNDING_SPATIAL_WEIGHT": value}):
                 with patch("hfsa_adapter.ensure_router_ready") as ready, patch("hfsa_adapter.Path.is_file") as is_file:
                     with self.assertRaises(ValueError):
                         HFSAAdapter.from_local()

@@ -1,5 +1,21 @@
 # 参赛队伍最小模型 API 示例（协议 2.0）
 
+## 2026-10-12 视觉定位绝对方位软加分（当前状态）
+
+默认 detection bbox 匹配支持首个目标子句的明确中英文全图方位，例如“左下角的梯形草坪”或 `the lawn in the top-right corner of the image`。完整描述仍进入原 OpenCLIP/检测网络；只对原图候选框中心增加连续位置分，不删除候选或改检测置信度。相对参照、否定、冲突、方位属于旁边物体或无法明确解析时使用原匹配；这是有限规则解析，不是通用空间推理或中文目标理解能力。
+
+`HFSA_GROUNDING_SPATIAL_WEIGHT` 默认 `0.15`，必须是 `[0,1]` 内有限数。最终分为原 phrase-map ROI 均值加 weight×位置分；指定轴按左/上 `1-coordinate`、右/下 `coordinate`、中心 `1-2*abs(coordinate-.5)` 取平均。位置分范围 `[0,1]`，坐标用各轴恢复后的原图框中心归一化。语义分差大于 weight 时位置分不能翻转排序。设为 `0` 可严格恢复原描述匹配。
+
+在原 API 终端沿用现有 Key 重启后生效：
+
+```bash
+cd /mnt/d/code/python/HFSA/提交/HFSA-main
+export HFSA_GROUNDING_SPATIAL_WEIGHT=0.15
+bash scripts/serve_hfsa_api.sh
+```
+
+关闭时将 export 的值改成 `0`。无需重启 Qwen/ngrok。presence、counting、VQA、显式 RefSeg 和 Web 不应用该加分；网络、权重、预处理及 `.25/.7/300` 检测参数不变。空候选仍失败，位置不能补造目标框；软加分不保证框在某象限。原公开诊断的分数属于此前未加分策略，不是本次效果证据。离线 benchmark 的 `--spatial-weight 0` 用于原策略，默认 `0.15`；对齐报告分开记录原选择与新增策略的选择。
+
 ## 2026-10-12 取消双时相变化任务（当前状态）
 
 用户已取消双时相任务。`tasks/change` 的推理源码、MCI/ChangeFormer 模型接线及专用下载、审计、验证脚本和测试已移除。API 启动不再读取变化模型包或相关环境变量；历史数据、权重、验证报告仍保存在 `runs/change/`。
@@ -35,7 +51,7 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   --data-root /mnt/d/code/python/HFSA/HFSA-main \
   --models-dir /mnt/d/code/python/HFSA/提交/HFSA_models \
   --output runs/grounding/diagnostic_20261011/paired80.json \
-  --per-class 4 --seed 42 --threads 4 --parity-samples 4 --overlays 8
+  --per-class 4 --seed 42 --threads 4 --parity-samples 4 --overlays 8 --spatial-weight 0
 ```
 
 结果（CPU/4线程、旧正式权重；本80条均800×800）：

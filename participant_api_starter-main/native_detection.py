@@ -15,6 +15,7 @@ import torch
 from PIL import Image
 
 from api_task_text import TaskInputError, detection_text
+from grounding_spatial import parse_absolute_position
 
 _CODE_DIR = Path(__file__).resolve().parents[1]
 if str(_CODE_DIR) not in sys.path:
@@ -126,10 +127,15 @@ class NativeDetection:
     """Single-description inference without test labels, GT matching or Web Predictors."""
 
     def __init__(self, checkpoint: str | Path, device: str | torch.device = "auto",
-                 encoder: NativeTextEncoder | None = None, *, max_image_size: int = 800) -> None:
+                 encoder: NativeTextEncoder | None = None, *, max_image_size: int = 800,
+                 spatial_weight: float = .15) -> None:
         if type(max_image_size) is not int or max_image_size < 800 or max_image_size % 32:
             raise ValueError("Detection max_image_size must be a multiple of 32, at least 800")
         self.max_image_size = max_image_size
+        if (isinstance(spatial_weight, bool) or not isinstance(spatial_weight, (int, float))
+                or not math.isfinite(spatial_weight) or not 0 <= spatial_weight <= 1):
+            raise ValueError("spatial_weight must be a finite number between 0 and 1")
+        self.spatial_weight = float(spatial_weight)
         self.checkpoint = Path(checkpoint).expanduser().resolve()
         if not self.checkpoint.is_file():
             raise FileNotFoundError("Native detection checkpoint is missing")
@@ -225,6 +231,33 @@ class NativeDetection:
         restored[:, [1, 3]] = ((restored[:, [1, 3]] - top) / gain_h).clamp(0, height)
         return restored
 
+    def _position_adjusted_scores(self, score: torch.Tensor, boxes: torch.Tensor,
+                                  original_hw: tuple[int, int], description: str) -> torch.Tensor:
+        """Add a bounded image-frame prior; never remove or invent candidates."""
+        if self.spatial_weight == 0:
+            return score
+        position = parse_absolute_position(description)
+        if position is None:
+            return score
+        height, width = original_hw
+        centers = ((boxes[:, :2] + boxes[:, 2:]) * .5
+                   / boxes.new_tensor([width, height])).clamp(0, 1)
+        axis_scores = []
+        for axis, direction in enumerate((position.horizontal, position.vertical)):
+            if direction is None:
+                continue
+            coordinate = centers[:, axis]
+            if direction == -1:
+                axis_scores.append(1 - coordinate)
+            elif direction == 1:
+                axis_scores.append(coordinate)
+            else:
+                axis_scores.append(1 - 2 * (coordinate - .5).abs())
+        prior = torch.stack(axis_scores).mean(dim=0)
+        nonempty = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+        prior = prior * nonempty.to(dtype=prior.dtype)
+        return score + self.spatial_weight * prior.unsqueeze(0)
+
     def predict(self, image: Image.Image | str | Path | np.ndarray,
                 original_question: str, *, require_grounding: bool = True) -> NativeDetectionResult:
         description = sanitize_text(detection_text(original_question), empty_placeholder="")
@@ -272,6 +305,9 @@ class NativeDetection:
                 raise TaskInputError("invalid_detection_result", "Invalid native detection candidates")
             if diagnostic is not None:
                 diagnostic["nms_candidate_count"] = len(detections)
+            boxes = detections[:, :4].clone()
+            if len(boxes):
+                boxes = self._restore_boxes(boxes, original.shape[:2], ratio_pad)
             selected = None
             if require_grounding and len(detections):
                 score = score_matrix_from_phrase_maps(
@@ -281,15 +317,13 @@ class NativeDetection:
                 )
                 if score.shape != (1, len(detections)) or not torch.isfinite(score).all():
                     raise TaskInputError("invalid_detection_matching", "Invalid description matching scores")
+                score = self._position_adjusted_scores(score, boxes, original.shape[:2], description)
                 rows, columns = assign_by_score_matrix(score, temperature=.7)
                 if rows.numel() != 1 or columns.numel() != 1 or int(rows[0]) != 0:
                     raise TaskInputError("invalid_detection_matching", "No unique description matching assignment")
                 selected = int(columns[0])
                 if not 0 <= selected < len(detections):
                     raise TaskInputError("invalid_detection_matching", "Invalid description matching index")
-            boxes = detections[:, :4].clone()
-            if len(boxes):
-                boxes = self._restore_boxes(boxes, original.shape[:2], ratio_pad)
         return NativeDetectionResult(
             boxes=boxes.detach().cpu().numpy().astype(np.float32, copy=False),
             scores=detections[:, 4].detach().cpu().numpy().astype(np.float32, copy=False),

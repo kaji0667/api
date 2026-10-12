@@ -154,7 +154,7 @@ class NativeDetectionTests(unittest.TestCase):
                            "The red warehouse at the left. A road lies above it.")
         self.task_text = text_patch.start()
         self.addCleanup(text_patch.stop)
-        self.native = NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder)
+        self.native = NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder, spatial_weight=0)
         self.image = Image.new("RGB", (80, 80), (64, 128, 192))
         self.question = "Synthetic official source question with protocol packaging."
 
@@ -168,6 +168,92 @@ class NativeDetectionTests(unittest.TestCase):
         self.assertEqual(result.model_prompt, self.task_text.return_value)
         self.task_text.assert_called_once_with(self.question)
         self.encoder.encode_descriptions.assert_called_once_with([result.model_prompt])
+
+    def test_absolute_corners_resolve_close_semantic_candidates_without_filtering(self):
+        self.native = NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder)
+        self.nms.return_value = [torch.tensor([
+            [16., 16., 416., 416., .9, 0.],
+            [416., 16., 816., 416., .8, 0.],
+            [16., 416., 416., 816., .2, 0.],
+            [416., 416., 816., 816., .7, 0.],
+        ])]
+        cases = ("左上角的梯形草坪", "The lawn in the top-right corner of the image",
+                 "左下角的梯形草坪，旁边有道路和房屋。", "The lawn in the bottom-right corner")
+        for expected, description in enumerate(cases):
+            with self.subTest(description=description):
+                self.task_text.return_value = description
+                self.encoder.encode_descriptions.reset_mock()
+                with patch("native_detection.score_matrix_from_phrase_maps", return_value=torch.ones((1, 4))):
+                    result = self.native.predict(self.image, self.question)
+                self.assertEqual(result.grounding_index, expected)
+                self.assertEqual(result.detection_count, 4)
+                np.testing.assert_allclose(result.scores, [.9, .8, .2, .7])
+                np.testing.assert_array_equal(result.boxes, [[0, 0, 40, 40], [40, 0, 80, 40],
+                                                           [0, 40, 40, 80], [40, 40, 80, 80]])
+                self.assertEqual(result.model_prompt, description)
+                self.encoder.encode_descriptions.assert_called_once_with([description])
+        self.assertEqual(self.nms.call_args.kwargs["conf_thres"], .25)
+        self.assertEqual(self.nms.call_args.kwargs["iou_thres"], .7)
+
+    def test_soft_bonus_can_resolve_near_tie_but_not_override_strong_semantics(self):
+        self.native = NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder)
+        self.task_text.return_value = "图像右下角的草坪"
+        for scores, expected in (([[1.02, 1.]], 1), ([[1.3, 1.]], 0)):
+            with self.subTest(scores=scores):
+                with patch("native_detection.score_matrix_from_phrase_maps", return_value=torch.tensor(scores)):
+                    result = self.native.predict(self.image, self.question)
+                self.assertEqual(result.grounding_index, expected)
+
+    def test_zero_weight_and_relative_or_ambiguous_text_keep_semantic_selection(self):
+        self.native = NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder)
+        cases = ("The lawn to the lower left of the warehouse", "右上角仓库旁的汽车",
+                 "草坪不在左下角", "The trapezoidal lawn")
+        for description in cases:
+            with self.subTest(description=description):
+                self.task_text.return_value = description
+                with patch("native_detection.score_matrix_from_phrase_maps", return_value=torch.tensor([[1.02, 1.]])):
+                    result = self.native.predict(self.image, self.question)
+                self.assertEqual(result.grounding_index, 0)
+        self.native.spatial_weight = 0
+        self.task_text.return_value = "图像右下角的草坪"
+        with patch("native_detection.parse_absolute_position") as parse, \
+                patch("native_detection.score_matrix_from_phrase_maps", return_value=torch.tensor([[1.02, 1.]])):
+            result = self.native.predict(self.image, self.question)
+        parse.assert_not_called()
+        self.assertEqual(result.grounding_index, 0)
+
+    def test_spatial_bonus_uses_restored_original_coordinates_on_panorama(self):
+        self.native = NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder)
+        self.task_text.return_value = "The building in the bottom-right corner of the image"
+        image = Image.new("RGB", (10000, 101))
+        original_boxes = torch.tensor([[1000., 10., 3000., 30.], [7000., 70., 9000., 90.]])
+        gains = torch.tensor([.16, 17 / 101, .16, 17 / 101])
+        network = original_boxes * gains + 16
+        self.nms.return_value = [torch.cat((network, torch.tensor([[.9, 0.], [.2, 0.]])), dim=1)]
+        with patch.object(self.native, "_preprocess", return_value=(
+                torch.zeros((1, 3, 64, 1632)), ((17 / 101, .16), (16, 16)))), \
+                patch("native_detection.score_matrix_from_phrase_maps", return_value=torch.tensor([[1.02, 1.]])), \
+                patch.object(self.native, "_position_adjusted_scores", wraps=self.native._position_adjusted_scores) as adjust:
+            result = self.native.predict(image, self.question)
+        torch.testing.assert_close(adjust.call_args.args[1], original_boxes, atol=.002, rtol=0)
+        self.assertEqual(adjust.call_args.args[2], (101, 10000))
+        self.assertEqual(result.grounding_index, 1)
+
+    def test_presence_skips_spatial_parser_even_with_enabled_weight(self):
+        self.native = NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder)
+        self.task_text.return_value = "图像右下角的草坪"
+        with patch("native_detection.parse_absolute_position") as parse:
+            result = self.native.predict(self.image, self.question, require_grounding=False)
+        parse.assert_not_called()
+        self.assertIsNone(result.grounding_index)
+        self.assertEqual(result.detection_count, 2)
+
+    def test_invalid_spatial_weight_fails_before_backend_loading(self):
+        self.backend_factory.reset_mock()
+        for weight in (-.1, 1.01, float("nan"), float("inf"), True, "0.15"):
+            with self.subTest(weight=weight), self.assertRaises(ValueError):
+                NativeDetection("synthetic.pt", device="cpu", encoder=self.encoder, spatial_weight=weight)
+        self.backend_factory.assert_not_called()
 
     def test_opt_in_diagnostic_observes_below_threshold_candidates_without_changing_nms(self):
         raw = torch.zeros((1, 5, 2))

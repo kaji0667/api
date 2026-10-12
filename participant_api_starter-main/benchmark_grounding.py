@@ -28,7 +28,8 @@ from api_task_text import TaskInputError
 from dataset.rrsisd_refseg_dataset import decode_segmentation_mask
 from hfsa_adapter import AdapterFailure, HFSAAdapter, QuestionPlan
 from native_detection import NativeDetection, NativeTextEncoder
-from native_parity import _capture_forward, _close, _detection_reference, _original_detection_image
+from native_parity import (_capture_forward, _close, _detection_reference, _original_detection_image,
+                           _detection_semantic_score_parity, _grounding_selection_parity)
 from native_refseg import NativeRefSegPredictor
 from tasks.refseg.runtime import predict_with_optional_text, resolve_existing_path
 
@@ -134,8 +135,7 @@ def detection_parity(native: Any, image: Path, description: str, prediction: Any
     (gain_h, gain_w), (pad_x, pad_y) = ratio_pad
     expected = (network_boxes - np.array([pad_x, pad_y, pad_x, pad_y])) / np.array([gain_w, gain_h, gain_w, gain_h])
     expected = np.clip(expected, 0, [original_hw[1], original_hw[0], original_hw[1], original_hw[0]])
-    if prediction.grounding_index != reference["selected"]:
-        raise AssertionError("Original/native assignment mismatch")
+    selection = _grounding_selection_parity(native, description, prediction, reference)
     if not observed["phrase_maps"] or len(observed["phrase_maps"]) != len(reference["maps"]):
         raise AssertionError("Original/native phrase-map level mismatch")
     return {
@@ -145,7 +145,8 @@ def detection_parity(native: Any, image: Path, description: str, prediction: Any
         "phrase_maps_max_abs_error": max((_close("maps", a, b) for a, b in zip(observed["phrase_maps"], reference["maps"])), default=0.0),
         "restored_boxes_max_abs_error": _close("boxes", prediction.boxes, expected, atol=2e-3),
         "scores_max_abs_error": _close("scores", prediction.scores, reference["scores"]),
-        "assignment_equal": True,
+        "semantic_scores_max_abs_error": _detection_semantic_score_parity(observed, reference, tuple(tensor.shape[2:])),
+        **selection,
         "legacy_restored_boxes_max_abs_difference": float(np.max(np.abs(reference["boxes"].numpy() - expected))) if expected.size else 0.0,
     }
 
@@ -184,7 +185,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     for path in assets.values():
         if not path.is_file():
             raise FileNotFoundError(path)
-    source_paths = [Path(__file__), Path(__file__).with_name("native_detection.py"), Path(__file__).with_name("native_refseg.py"),
+    source_paths = [Path(__file__), Path(__file__).with_name("native_detection.py"), Path(__file__).with_name("grounding_spatial.py"), Path(__file__).with_name("native_refseg.py"),
                     Path(__file__).with_name("native_parity.py"), Path(__file__).with_name("hfsa_adapter.py"),
                     CODE_DIR / "tasks/detection/test.py", CODE_DIR / "ultralytics/utils/ops.py",
                     CODE_DIR / "ultralytics/nn/modules/text_backbone.py"]
@@ -192,7 +193,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     started = time.perf_counter()
     print("Loading existing CPU CLIP and detection weights", flush=True)
     encoder = NativeTextEncoder(device="cpu", pretrained=str(assets["clip"]))
-    detection = NativeDetection(assets["detection"], device="cpu", encoder=encoder, max_image_size=1600)
+    detection = NativeDetection(assets["detection"], device="cpu", encoder=encoder, max_image_size=1600,
+                                spatial_weight=args.spatial_weight)
 
     def existing_encoder(**kwargs: Any) -> Any:
         if kwargs["model_name"] != encoder.encoder.model_name or kwargs["device"] != "cpu" or kwargs["precision"] != "fp32":
@@ -282,7 +284,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "detection_training_image_overlap": "unknown; original detection training split/cache not available",
             "geographic_source_isolation": "unknown", "source_and_asset_sha256": hashes_before,
             "settings": {"detection_cap": 1600, "detection_conf": .25, "nms_iou": .7, "max_det": 300,
-                         "matching_temperature": .7, "refseg_imgsz": refseg.imgsz, "refseg_threshold": refseg.threshold},
+                         "matching_temperature": .7, "spatial_weight": detection.spatial_weight,
+                         "selection_score": "phrase ROI score + spatial_weight * absolute-position bonus",
+                         "refseg_imgsz": refseg.imgsz, "refseg_threshold": refseg.threshold},
             "metric_target": "annotation bbox interpreted as xyxy; mask-derived exclusive bbox reported separately",
             "oracle_metric": "all native candidates rounded outward by the same API box rule; diagnostic only",
             "api_validation": "fixed-task native-result to actual adapter output mapping; no HTTP or Ollama routing",
@@ -303,11 +307,15 @@ def main() -> None:
     parser.add_argument("--per-class", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--spatial-weight", type=float, default=.15,
+                        help="Absolute-position selection bonus in [0,1]; 0 reproduces semantic-only selection")
     parser.add_argument("--parity-samples", type=int, default=4)
     parser.add_argument("--overlays", type=int, default=8)
     args = parser.parse_args()
     if args.threads <= 0 or args.parity_samples < 0 or args.overlays < 0:
         parser.error("threads must be positive; parity-samples and overlays must be nonnegative")
+    if not np.isfinite(args.spatial_weight) or not 0 <= args.spatial_weight <= 1:
+        parser.error("spatial-weight must be finite and in [0,1]")
     report = run(args)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"report": str(args.output), "summary": report["summary"]}, ensure_ascii=False), flush=True)

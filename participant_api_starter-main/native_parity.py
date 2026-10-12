@@ -252,13 +252,14 @@ def _detection_reference(native: Any, tensor: torch.Tensor, description: str,
         raw_before_nms = _first_tensor(raw).detach().cpu().clone()
         detections = non_max_suppression(raw, conf_thres=.25, iou_thres=.7, multi_label=False, agnostic=True, max_det=300)[0]
         selected = None
+        phrase_scores = torch.empty((1, 0), device=native.device, dtype=tensor.dtype)
         if match and len(detections):
-            scores = score_matrix_from_phrase_maps(
+            phrase_scores = score_matrix_from_phrase_maps(
                 phrase_logits_levels=maps, image_index=0,
                 token_indices=torch.zeros(1, device=native.device, dtype=torch.long),
                 candidate_boxes_xyxy=detections[:, :4], input_hw=tuple(tensor.shape[2:]),
             )
-            rows, columns = assign_by_score_matrix(scores, temperature=.7)
+            rows, columns = assign_by_score_matrix(phrase_scores, temperature=.7)
             _require(rows.numel() == columns.numel() == 1 and int(rows[0]) == 0, "reference_grounding_assignment")
             selected = int(columns[0])
         network_boxes = detections[:, :4].clone()
@@ -280,8 +281,80 @@ def _detection_reference(native: Any, tensor: torch.Tensor, description: str,
         "maps": [value.detach().cpu().clone() for value in maps],
         "boxes": boxes.detach().cpu(), "scores": detections[:, 4].detach().cpu(),
         "network_boxes": network_boxes.detach().cpu(), "geometry_boxes": geometry_boxes,
+        "phrase_scores": phrase_scores.detach().cpu(),
         "selected": selected, "conditions": conditions,
     }
+
+
+def _grounding_selection_parity(native: Any, description: str, prediction: Any,
+                                reference: dict[str, Any]) -> dict[str, Any]:
+    """Check deployment selection with an independent NumPy spatial formula.
+
+    The original phrase-map matcher remains the semantic reference. An enabled
+    absolute-position bonus may change its index, without changing the model,
+    NMS candidates or their confidence scores. No annotations enter this check.
+    """
+    from grounding_spatial import parse_absolute_position
+
+    semantic = torch.as_tensor(reference["phrase_scores"]).detach().cpu().numpy()
+    # The separate geometry check verifies these native boxes against the
+    # independent resize inverse. Use the deployed dtype here so a float64
+    # reference inverse cannot flip an otherwise exact float32 score tie.
+    boxes = np.asarray(prediction.boxes, dtype=semantic.dtype)
+    _require(semantic.shape == (1, len(boxes)) and np.isfinite(semantic).all(),
+             "detection_semantic_score_shape")
+    weight = float(getattr(native, "spatial_weight", 0.0))
+    _require(np.isfinite(weight) and 0 <= weight <= 1, "detection_spatial_weight")
+    hint = parse_absolute_position(description) if weight else None
+    final = semantic.copy()
+    if hint is not None and len(boxes):
+        height, width = prediction.original_size
+        axes = []
+        for direction, first, second, extent in (
+            (hint.horizontal, 0, 2, width), (hint.vertical, 1, 3, height),
+        ):
+            if direction is None:
+                continue
+            coordinate = np.clip((boxes[:, first] + boxes[:, second]) / 2 / extent, 0, 1)
+            if direction == -1:
+                axes.append(1 - coordinate)
+            elif direction == 1:
+                axes.append(coordinate)
+            elif direction == 0:
+                axes.append(1 - 2 * np.abs(coordinate - .5))
+            else:
+                raise AssertionError("Native parity contract mismatch: detection_spatial_hint")
+        _require(bool(axes), "detection_spatial_hint_axes")
+        bonus = np.mean(np.stack(axes), axis=0)
+        valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+        bonus = np.where(valid, bonus, 0)
+        final = final + weight * bonus[None, :]
+    expected = int(np.argmax(final[0])) if final.shape[1] else None
+    original = reference["selected"]
+    if hint is None:
+        _require(expected == original, "detection_original_phrase_assignment")
+    _require(prediction.grounding_index == expected, "detection_spatial_selection")
+    return {
+        "original_selected_index": original, "expected_selected_index": expected,
+        "native_selected_index": prediction.grounding_index,
+        "spatial_weight": weight,
+        "spatial_hint": {"horizontal": hint.horizontal, "vertical": hint.vertical} if hint is not None else None,
+        "assignment_equal": prediction.grounding_index == original,
+        "selection_policy_checked": True,
+    }
+
+
+def _detection_semantic_score_parity(observed: dict[str, Any], reference: dict[str, Any],
+                                    input_hw: tuple[int, int]) -> float:
+    """Compare original ROI scores using the captured native phrase maps."""
+    from text_encoder.matching import score_matrix_from_phrase_maps
+
+    scores = score_matrix_from_phrase_maps(
+        phrase_logits_levels=observed["phrase_maps"], image_index=0,
+        token_indices=torch.zeros(1, dtype=torch.long),
+        candidate_boxes_xyxy=reference["network_boxes"], input_hw=input_hw,
+    )
+    return _close("detection_semantic_phrase_scores", scores, reference["phrase_scores"])
 
 
 def _detection(adapter: Any, image: Path) -> dict[str, Any]:
@@ -312,11 +385,12 @@ def _detection(adapter: Any, image: Path) -> dict[str, Any]:
         result.boxes.astype(np.float64) - reference["boxes"].numpy().astype(np.float64),
     ))) if result.boxes.size else 0.0
     scores_error = _close("detection_scores", result.scores, reference["scores"])
-    _require(result.grounding_index == reference["selected"], "detection_phrase_assignment")
+    selection = _grounding_selection_parity(native, description, result, reference)
     _require(len(observed["phrase_maps"]) == len(reference["maps"]), "detection_phrase_levels")
     map_error = max((_close("detection_phrase_maps", actual, expected, atol=1e-5)
                      for actual, expected in zip(observed["phrase_maps"], reference["maps"])), default=0.0)
-    selected = reference["selected"]
+    semantic_error = _detection_semantic_score_parity(observed, reference, tuple(tensor.shape[2:]))
+    selected = selection["expected_selected_index"]
     expected_box = None
     empty_code = "empty_detections"
     height, width = original_hw
@@ -354,6 +428,8 @@ def _detection(adapter: Any, image: Path) -> dict[str, Any]:
         "coordinate_restore": "per_axis_resize_gain",
         "legacy_boxes_max_abs_difference": legacy_boxes_error,
         "phrase_maps_max_abs_error": map_error, "api_mapping_checked": True,
+        "semantic_scores_max_abs_error": semantic_error,
+        "selection": selection,
         "presence_checked": True, "presence_api_boolean_mapping_checked": True,
         "presence_candidate_count": len(presence_reference["boxes"]),
     }

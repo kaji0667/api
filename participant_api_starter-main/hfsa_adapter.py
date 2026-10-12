@@ -318,6 +318,9 @@ class HFSAAdapter:
         max_detection_size = int(os.environ.get("HFSA_DETECTION_MAX_IMGSZ", "1600"))
         if max_detection_size < 800 or max_detection_size % 32:
             raise ValueError("HFSA_DETECTION_MAX_IMGSZ must be a multiple of 32, at least 800")
+        spatial_weight = float(os.environ.get("HFSA_GROUNDING_SPATIAL_WEIGHT", "0.15"))
+        if not math.isfinite(spatial_weight) or not 0 <= spatial_weight <= 1:
+            raise ValueError("HFSA_GROUNDING_SPATIAL_WEIGHT must be a finite number between 0 and 1")
         print("HFSA API: checking local Qwen text router", flush=True)
         ensure_router_ready()
         code_dir = Path(__file__).resolve().parents[1]
@@ -359,6 +362,7 @@ class HFSAAdapter:
         detection = NativeDetection(
             checkpoint=checkpoints["detection"], device=device, encoder=shared_encoder,
             max_image_size=max_detection_size,
+            spatial_weight=spatial_weight,
         )
         print("HFSA API: loading counting", flush=True)
         counting = NativeCounting(

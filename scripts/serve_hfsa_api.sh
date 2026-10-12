@@ -14,6 +14,7 @@ export HFSA_MODELS_DIR="${HFSA_MODELS_DIR:-$hfsa_code_dir/../HFSA_models}"
 export HFSA_API_DEVICE="${HFSA_API_DEVICE:-auto}"
 export HFSA_VQA_DEVICE="${HFSA_VQA_DEVICE:-cpu}"
 export HFSA_GROUNDING_BACKEND="${HFSA_GROUNDING_BACKEND:-detection}"
+export HFSA_GROUNDING_SPATIAL_WEIGHT="${HFSA_GROUNDING_SPATIAL_WEIGHT:-0.15}"
 export HFSA_VQA_BUNDLE_DIR="$hfsa_code_dir/runs/vqa/qformer"
 # Private, portable JSONL diagnostics; explicitly export an empty value to disable.
 export HFSA_API_DIAGNOSTIC_FILE="${HFSA_API_DIAGNOSTIC_FILE-${XDG_DATA_HOME:-$HOME/.local/share}/hfsa/prediction-diagnostics.jsonl}"
