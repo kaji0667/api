@@ -132,8 +132,7 @@ class VQAContractTests(unittest.TestCase):
         for kind in expected:
             with self.subTest(question_type=kind):
                 self.assertEqual(tuple(answers[kind].shape),(2,2))
-                self.assertGreater(float(head.answers[kind].classifier.weight.grad.norm()),0)
-                self.assertGreater(float(head.answers[kind].mlp[0].weight.grad.norm()),0)
+                self.assertGreater(float(head.answers[kind].weight.grad.norm()),0)
     def test_bundle_rejects_five_or_mismatched_heads_before_model_loading(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

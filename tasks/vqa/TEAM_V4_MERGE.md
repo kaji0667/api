@@ -1,5 +1,7 @@
 # 队友 VQA v4 合并记录
 
+2026-10-13 后续：用户明确选择恢复v3；当前默认已成对恢复为十二类线性头及v3完整包，v4完整保护而不自动加载。当前状态见 [v3恢复记录](V3_RESTORE.md)。以下是v4合并时的历史记录。
+
 2026-10-13 收到完整 v4 交付，仅合并 `model.py` 的实际结构增量：十二个 `ResidualAnswerHead` 和题型分类器的 LayerNorm。残差头计算为 `classifier(x + mlp(x))`，MLP 顺序是 Linear / LayerNorm / GELU / Dropout，dropout 取交付配置 `.2`。完整原题、归一、词表、题型集合和解码保持 v3；VQA 短文本、单选、枚举继续复用同一模型。
 
 默认包仍在 `runs/vqa/qformer/`，其中全部16文件来自 `bundle/merged_v4` 并保持原字节。权重 SHA256 为 `2858c240b620915b9958ee3fa3f63f0bc01bc5c0c151b75f247852c2f551bf8b`。旧十二头线性包与五头残差包移出工程完整保留对照；重复交付 code/bundle/reference/readme 经过核对后清理，不保留双层交付目录或独立 text 部署。

@@ -1,6 +1,6 @@
 # 队友十二类 VQA 合并记录
 
-2026-10-13 后续：当前已升级为队友 v4 十二类残差答案头及其配套完整模型包，仍使用 `runs/vqa/qformer`；原v3线性头包移出交付工程作对照。当前结构/验收见 [v4合并记录](TEAM_V4_MERGE.md)。以下是v3合并时的历史记录。
+2026-10-13 当前：用户根据固定公开合成单选对照选择恢复v3十二类线性头，源码与完整16文件包已成对恢复至 `runs/vqa/qformer`，v4完整保护。当前验收与边界见 [v3恢复记录](V3_RESTORE.md)，以下保留首次v3合并记录。
 
 2026-10-13 合并队友交付的任务源码和 Q-Former bundle。共享 YOLOv12m、OpenCLIP 和融合结构保持不变，答案头扩至十二类，新增 quantity/position/size/direction/comparison/relation/other。`short_text`、`single_choice`、`enum` 继续使用完整原题，保留选项原键和枚举原值；整数计数仍使用独立计数器。
 

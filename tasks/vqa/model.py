@@ -96,23 +96,6 @@ def unpack_visual(flat, config):
     if offset != flat.shape[1]: raise ValueError("Invalid cached visual shape")
     return result
 
-class ResidualAnswerHead(nn.Module):
-    """Task-owned residual MLP followed by the trained answer classifier."""
-
-    def __init__(self, in_features: int, num_classes: int, dropout: float = 0.1):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(in_features, in_features),
-            nn.LayerNorm(in_features),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        self.classifier = nn.Linear(in_features, num_classes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.classifier(x + self.mlp(x))
-
-
 class VQAHead(nn.Module):
     """Every trainable parameter, including question routing, belongs to this state_dict."""
     def __init__(self, config, labels):
@@ -122,10 +105,10 @@ class VQAHead(nn.Module):
         self.projections=nn.ModuleList(nn.Conv2d(c,d,1) for c in config["channels"])
         self.position=nn.Sequential(nn.Linear(3,d),nn.GELU(),nn.Linear(d,d))
         self.question=nn.Sequential(nn.Linear(768,d),nn.LayerNorm(d),nn.GELU())
-        self.type_classifier=nn.Sequential(nn.Linear(768,d),nn.LayerNorm(d),nn.GELU(),nn.Dropout(config["dropout"]),nn.Linear(d,len(labels["types"])))
+        self.type_classifier=nn.Sequential(nn.Linear(768,d),nn.GELU(),nn.Dropout(config["dropout"]),nn.Linear(d,len(labels["types"])))
         self.visual_norm=nn.LayerNorm(d)
         self.fusion=nn.Sequential(nn.Linear(d*4,d*2),nn.LayerNorm(d*2),nn.GELU(),nn.Dropout(config["dropout"]))
-        self.answers=nn.ModuleDict({t:ResidualAnswerHead(d*2,len(labels["answers"][t]),dropout=config["dropout"]) for t in SUPPORTED})
+        self.answers=nn.ModuleDict({t:nn.Linear(d*2,len(labels["answers"][t])) for t in SUPPORTED})
         from .qformer import QuestionQueryFormer
         self.query_former=QuestionQueryFormer(config)
         coords=[]
