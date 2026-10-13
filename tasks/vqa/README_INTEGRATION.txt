@@ -17,7 +17,7 @@ HFSA 独立视觉问答模块（当前十二头 Q-Former v2）
   tasks/vqa/                         数据、缓存、模型、训练、评估和推理代码
   config/vqa/qformer.json             正式训练配置
   scripts/train_vqa.sh                正式训练入口
-  scripts/eval_vqa.sh                 全量验证入口
+  scripts/test_vqa.sh                 全量验证入口
   scripts/verify_vqa_qformer.py       当前权重在线/缓存核验
   scripts/verify_vqa_api.py           当前权重与 HTTP 接口核验
   scripts/serve_hfsa_api.sh           使用原已 export Key 启动当前 API
@@ -39,7 +39,7 @@ HFSA 独立视觉问答模块（当前十二头 Q-Former v2）
 资产路径从启动时工程根目录解析：../HFSA_models/pretrain_model/yolov12m.pt 和 ../HFSA_models/openclip/ViT-L-14.pt。复用已有资产和冻结缓存，不安装新框架或下载新权重。其它机器须准备对应数据与资产并配置路径。
 
 全量评估：
-  BUNDLE_DIR=runs/vqa/qformer OUT_DIR=runs/vqa/qformer/evaluation bash scripts/eval_vqa.sh --cache-dir ../vqa_work_20261011/cache/full
+  BUNDLE_DIR=runs/vqa/qformer OUT_DIR=runs/vqa/qformer/evaluation bash scripts/test_vqa.sh --cache-dir ../vqa_work_20261011/cache/full
 默认 val 为 ../vqa_work_20261011/data/val_final.jsonl，完整分母为 37392。BUNDLE_DIR、VAL_JSONL、VISUAL_BACKBONE、TEXT_ENCODER、DEVICE、OUT_DIR 可覆盖。在线路径逐条执行；--cache-dir 可批量评估，校验数据/图片哈希、外部资产和预处理。--ablations --formats 增加输入移除消融与公共 QA 构造选项的格式诊断。未知、失败、不支持均计入完整分母；全 QA 与五类子集分别报告，不能将未实现题型从总分母删除。
 
 API 完整训练门禁：

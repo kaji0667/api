@@ -25,6 +25,10 @@ runs/semseg/srp_yolov12m_axis/weights/best_raw.pt
 openclip/ViT-L-14.pt
 ```
 
+各任务统一使用 `tasks/<task>/` 放实现，`scripts/train_<task>.sh` / `scripts/test_<task>.sh` 放训练与评估入口，`runs/<task>/` 放权重和实验记录。VQA 使用 `scripts/prepare_vqa.sh`、`scripts/train_vqa.sh`、`scripts/test_vqa.sh`，不再保留根目录 `run_vqa.py`。原 `scripts/eval_vqa.sh` 命令改用 `scripts/test_vqa.sh`，参数不变。
+
+新增文本回答交付包已整理到 `runs/vqa/text/`。该包缺少与其 MLP 答案头匹配的源码，当前仅完成资产整理与完整性检查，尚未接入 API；当前十二头包继续位于 `runs/vqa/qformer/`。详细交付状态见 [文本回答整理记录](tasks/vqa/TEAM_TEXT_MERGE.md)。
+
 ## 3. 一键启动
 
 ```bash

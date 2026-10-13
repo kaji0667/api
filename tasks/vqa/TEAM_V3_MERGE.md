@@ -8,7 +8,7 @@
 
 包未交付真实缓存和绑定JSONL；8,481/9,345张验证图的像素哈希与旧本地记录不同，文件字节哈希全部一致。24题分别核查时，WSL Pillow12/libjpeg-turbo3.1.2像素全部匹配新记录，Windows Pillow11.3/libjpeg9像素全部匹配旧记录；多项环境同时不同，未隔离单一原因。不能沿用旧缓存宣称全量张量一致。训练收据保留原来源路径，推理通过 `asset_paths` 接当前本地相同SHA的YOLO/CLIP。
 
-`run_vqa.py --help` 可查看补充训练材料的七阶段编排。使用时必须显式指定 `--materials-dir` 到包含 `raw/Annotations_*.zip` 的原训练材料；这些数据不随源码或Git备份发布。
+VQA 与其他任务使用相同的入口布局：`scripts/prepare_vqa.sh` 准备数据，`scripts/train_vqa.sh` 训练，`scripts/test_vqa.sh` 评估；分别直接调用 `tasks.vqa.data/train/evaluate`。根目录的 `run_vqa.py` 已移除，不再保留独立的七阶段编排入口。原始标注、数据和模型不随源码 Git 备份发布；模型包封装仍使用 `scripts/finalize_vqa_bundle.py`。
 
 定向验收命令：`python -B -m unittest tasks.vqa.test_contract tasks.vqa.test_qformer -v`。API题型契约同步为任务配置SUPPORTED，仍拒绝未知类型、越界选项、双图和非法输出。真实本机推理及API回归完成情况以本次验收记录为准；模型文件、缓存、官网题目和凭据不提交Git。
 
