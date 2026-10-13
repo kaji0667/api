@@ -2,14 +2,13 @@
 import unittest
 import tempfile,json
 from pathlib import Path
-from unittest.mock import patch
 import torch
 from .config import DEFAULTS,SUPPORTED,TYPES
-from .data import normalize_answer,assert_split_isolation,question_type,comparison_intent,read_rows,build_labels
-from .inference import decode_prediction,validate_modes,load_bundle
+from .data import normalize_answer,assert_split_isolation,question_type,comparison_intent
+from .inference import decode_prediction,validate_modes
 from .model import FrozenText,VQAHead
 from .cache import FeatureCache
-from .config import sha256,ARCHITECTURE_ID,FORMAT_VERSION
+from .config import sha256
 
 def labels():
     return dict(types=list(TYPES),supported=list(SUPPORTED),answers={t:["no","yes"] if t=="existence" else ["gray","green"] for t in SUPPORTED},aliases={t:{} for t in SUPPORTED})
@@ -51,106 +50,11 @@ class VQAContractTests(unittest.TestCase):
         for ch,en in [({},None),({"A":""},None),(None,[]),({"A":"x"},["x"])]:
             with self.assertRaises(ValueError):validate_modes(ch,en)
     def test_unsupported_guard(self):
-        for q in ["这张图里有多少架飞机？","Compare the first and second image.","What has changed between the two images?"]:
-            r=decode_prediction(self.t,self.a,self.labels,q)
-            self.assertEqual(r["status"],"unsupported")
-            self.assertIsNone(r["answer"])
+        for q in ["How many planes?","Where is the red roof?","Which object is larger?"]:
+            r=decode_prediction(self.t,self.a,self.labels,q);self.assertEqual(r["status"],"unsupported");self.assertIsNone(r["answer"])
     def test_multicolor_preserved(self):
         self.assertEqual(normalize_answer(" Red and Blue. "),"red and blue")
         self.assertNotEqual(normalize_answer("red and blue"),"red")
-    def test_delivery_normalization_covers_numbers_shapes_and_preserved_suffixes(self):
-        examples={"Zero":"0","One":"1","Twenty":"20","The same size.":"same size",
-                  "Bottom-right":"bottom right","Semi-circle":"semicircle",
-                  "semi circle":"semicircle","Ships":"ship","Various":"various",
-                  "Tennis":"tennis","Status":"status","Grass":"grass",
-                  "The grey ships.":"gray ship"}
-        for original,expected in examples.items():
-            with self.subTest(answer=original):
-                self.assertEqual(normalize_answer(original),expected)
-    def test_read_rows_recomputes_stale_answers_without_changing_source(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path=Path(directory)/"data.jsonl"
-            rows=[dict(sample_id="test:1",image_id="one",image_path="one.jpg",
-                       question="How many ships?",question_type="quantity",
-                       answer="The Two Ships.",normalized_answer="obsolete"),
-                  dict(sample_id="test:2",image_id="two",image_path="two.jpg",
-                       question="Where is the ship?",question_type="position",
-                       normalized_answer="Bottom-right")]
-            path.write_text("".join(json.dumps(row)+"\n" for row in rows),encoding="utf-8")
-            original=path.read_bytes();loaded=read_rows(path)
-            self.assertEqual([row["normalized_answer"] for row in loaded],["2 ship","bottom right"])
-            self.assertEqual(loaded[0]["answer"],"The Two Ships.")
-            self.assertEqual(path.read_bytes(),original)
-    def test_training_labels_keep_singleton_answers_for_all_twelve_types(self):
-        self.assertEqual(DEFAULTS["min_answer_count"],1)
-        rows=[dict(question_type=t,answer="Ships",normalized_answer=normalize_answer("Ships"))
-              for t in SUPPORTED]
-        result=build_labels(rows,min_count=DEFAULTS["min_answer_count"])
-        self.assertEqual(result["supported"],list(SUPPORTED))
-        self.assertTrue(all(values==["ship"] for values in result["answers"].values()))
-    def test_all_twelve_types_preserve_three_answer_formats(self):
-        examples={"category":("What object is shown?",["ship","airplane"]),
-                  "color":("What color is the roof?",["gray","green"]),
-                  "shape":("What shape is the roof?",["square","circle"]),
-                  "existence":("Is there an airplane?",["no","yes"]),
-                  "scene":("What scene is shown?",["airport","harbor"]),
-                  "quantity":("How many ships are there?",["1","2"]),
-                  "position":("Where is the ship?",["left","right"]),
-                  "size":("What size is the ship?",["small","large"]),
-                  "direction":("Which direction does the airplane face?",["left","right"]),
-                  "comparison":("Which object is larger?",["airplane","ship"]),
-                  "relation":("Is the road inside or outside the park?",["inside","outside"]),
-                  "other":("What else is shown?",["first","second"])}
-        self.assertEqual(tuple(examples),SUPPORTED)
-        vocabulary=dict(types=list(TYPES),supported=list(SUPPORTED),
-                        answers={t:values for t,(_,values) in examples.items()},
-                        aliases={t:{} for t in SUPPORTED})
-        answer_logits={t:torch.tensor([0.,3.]) for t in SUPPORTED}
-        for index,(kind,(question,values)) in enumerate(examples.items()):
-            type_logits=torch.full((len(TYPES),),-9.);type_logits[index]=9.
-            display=["One","Two"] if kind=="quantity" else values
-            for mode,options,expected in (
-                    ("short_text",{},values[1]),
-                    ("single_choice",{"choices":{"original-low":display[0],"original-high":display[1]}},"original-high"),
-                    ("enum",{"allowed_answers":display},display[1])):
-                with self.subTest(question_type=kind,mode=mode):
-                    result=decode_prediction(type_logits,answer_logits,vocabulary,question,**options)
-                    self.assertEqual(result["status"],"ok")
-                    self.assertEqual(result["question_type"],kind)
-                    self.assertEqual(result["answer"],expected)
-                    self.assertEqual(result["answer_text"],values[1])
-    def test_all_twelve_answer_heads_are_built_and_receive_gradients(self):
-        expected=("category","color","shape","existence","scene","quantity",
-                  "position","size","direction","comparison","relation","other")
-        self.assertEqual(SUPPORTED,expected);self.assertEqual(TYPES,expected)
-        config={**DEFAULTS,"grids":[2,1,1],"hidden_dim":32,"dropout":0.}
-        head=VQAHead(config,self.labels)
-        visual=[torch.randn(2,ch,g,g) for ch,g in zip(config["channels"],config["grids"])]
-        type_logits,answers=head(visual,torch.randn(2,768))
-        self.assertEqual(tuple(type_logits.shape),(2,12));self.assertEqual(tuple(answers),expected)
-        (type_logits.square().mean()+sum(value.square().mean() for value in answers.values())).backward()
-        for kind in expected:
-            with self.subTest(question_type=kind):
-                self.assertEqual(tuple(answers[kind].shape),(2,2))
-                self.assertGreater(float(head.answers[kind].weight.grad.norm()),0)
-    def test_bundle_rejects_five_or_mismatched_heads_before_model_loading(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory)
-            (root/"inference.json").write_text(json.dumps(DEFAULTS),encoding="utf-8")
-            cases=[(list(SUPPORTED[:5]),self.labels),
-                   (list(SUPPORTED),{**self.labels,"supported":list(SUPPORTED[:5])}),
-                   (list(SUPPORTED),{**self.labels,"types":list(reversed(TYPES))}),
-                   (list(SUPPORTED),{**self.labels,"answers":{t:self.labels["answers"][t] for t in SUPPORTED[:5]}})]
-            for supported,vocabulary in cases:
-                with self.subTest(supported=supported,label_keys=list(vocabulary["answers"])):
-                    (root/"manifest.json").write_text(json.dumps(dict(format_version=FORMAT_VERSION,
-                        architecture_id=ARCHITECTURE_ID,supported_question_types=supported,
-                        file_sha256={},external_assets=[],configs=dict(inference="inference.json",labels="labels.json"))),encoding="utf-8")
-                    (root/"labels.json").write_text(json.dumps(vocabulary),encoding="utf-8")
-                    with patch("tasks.vqa.inference.torch.load") as load,patch("tasks.vqa.inference.VQAHead") as head:
-                        with self.assertRaisesRegex(ValueError,"supported question types"):
-                            load_bundle(root,{})
-                        load.assert_not_called();head.assert_not_called()
     def test_size_qualifiers_preserve_attribute_intent(self):
         for q in ["What color is the smaller airplane?","What shape is the larger roof?"]:
             self.assertFalse(comparison_intent(q))

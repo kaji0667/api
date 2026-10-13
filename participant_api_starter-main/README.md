@@ -69,7 +69,7 @@ Detection 候选 recall@0.5=66/80（82.5%），14条没有合格候选、4条有
 
 ## 当前 Q-Former VQA 接入与本机启动（2026-10-13）
 
-已合并队友十二头源码与对应完整bundle，新增 quantity/position/size/direction/comparison/relation/other。API成功返回门禁直接使用任务配置SUPPORTED；整数仍走独立计数。当前包 head SHA256 为 `44224d6c3e9899595e1e87c87e342b5393de7c78368c78b151fe8021185bd8f8`，37,392条公开选模val复算53.797604%，不是官网成绩。旧五头包不再兼容。详见 [合并验收与已知限制](../tasks/vqa/TEAM_V3_MERGE.md)；下文2026-10-11五头指标/核验属于历史快照。
+当前已恢复合并队友代码前的五头 Q-Former v2，支持 category/color/shape/existence/scene；完整源码、原答案归一与模型包成套，head SHA256 为 `8f6ed01a42a22c7f82ff410ba4a5e6a8e56da79274b05d0eb4896408fc8cc706`。v3/v4 完整源码和权重已在工程外备份。位置、比较等未实现能力显式失败；不自动换模型。
 
 `MODEL_MODE=real` 的 `vqa` 分支当前默认引用 `runs/vqa/qformer/weights/vqa_head.pt`，只接受架构 `hfsa_frozen_qformer_vqa_v2`、融合 `blip2_qformer` 的正式产物。独立 `tasks.vqa.inference.VQAPredictor` 接收图片、完整原题和原选项，构造一次后连续复用。`classification` 继续使用原21类场景分类。本节覆盖下文历史 VQA 拒绝或复用分类的记录。
 
@@ -141,7 +141,7 @@ Ollama 仍只选 `task`。Adapter 将 `question` 原字符串传到 native task�
 | 任务 | 当前原生流程 |
 | --- | --- |
 | 场景分类 | 原 Network + strict Head；checkpoint 类序、RGB/640 eval transform、softmax |
-| 单图 VQA 回答 | 正式 Q-Former v2 独立VQA，完整问题参与融合；十二类答案头，保留原单选键/枚举值 |
+| 单图 VQA 回答 | 正式 Q-Former v2 独立VQA，完整问题参与融合；五类答案头，保留原单选键/枚举值 |
 | 检测定位 | 原 PyTorch backend；小图沿用800，大图长边按32对齐且最多1600，ceil resize、单图 rect/pad=.5/stride 补边、RGB/255；conf=.25/NMS=.7/max_det300；描述匹配 temperature=.7；原图 xyxy |
 | 有无判断 | 同检测候选流程，不做单框匹配；NMS 框是否为空映射 Yes/No |
 | 类别计数 | 原 ObjectCounter、类别遥感模板、800 方形 letterbox、.15/.5/300；NMS 后框数 |

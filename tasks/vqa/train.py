@@ -48,7 +48,7 @@ def save_bundle(root,head,config,labels,epoch,score,assets,environment):
                   verified_devices=[],verified_precisions=[],python_version=environment["python"],
                   metrics="best_validation.json",environment="environment.json",
                   validation_predictions="evaluation/val_predictions.jsonl",evaluation_status="pending",
-                  limitations=["finite training-only answer vocabulary","640 full-image baseline; no high-resolution regions or explicit localization","English questions only","softmax confidence is not calibrated accuracy","same parent name isolation does not prove geographical isolation"])
+                  limitations=["finite training-only answer vocabulary","640 full-image baseline; no high-resolution regions, localization, comparison or relation answer heads","English questions only","softmax confidence is not calibrated accuracy","same parent name isolation does not prove geographical isolation"])
     from .qformer import UPSTREAM
     manifest.update(fusion_backend="blip2_qformer",fusion_source=UPSTREAM)
     manifest["limitations"].append("Adapted Q-Former structure; no pretrained BLIP-2/BERT/LLM weights or BLIP-2 pretraining objectives")

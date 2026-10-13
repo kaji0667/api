@@ -11,12 +11,11 @@ ARCHITECTURE_IDS = (ARCHITECTURE_ID,)
 QFORMER_DEFAULTS = dict(qformer_queries=32, qformer_layers=2, qformer_heads=4,
                         qformer_ffn_multiplier=4, qformer_cross_attention_freq=2,
                         qformer_dropout=0.1)
-SUPPORTED = ("category", "color", "shape", "existence", "scene",
-             "quantity", "position", "size", "direction", "comparison", "relation", "other")
-TYPES = SUPPORTED
+SUPPORTED = ("category", "color", "shape", "existence", "scene")
+TYPES = SUPPORTED + ("quantity", "position", "size", "direction", "comparison", "relation", "other")
 DEFAULTS = dict(imgsz=640, grids=[16, 8, 4], channels=[256, 512, 512], text_dim=768,
                 hidden_dim=192, dropout=0.2, seed=42, batch=128, epochs=15, lr=0.001,
-                weight_decay=0.0001, patience=4, min_answer_count=1, workers=0,
+                weight_decay=0.0001, patience=4, min_answer_count=2, workers=0,
                 type_loss_weight=0.5, augmentation="none", sampling="type_balanced",
                 precision="fp32_head_fp16_cache", text_model="ViT-L-14", text_chunk_tokens=75,
                 model_yaml="ultralytics/cfg/models/v12/yolov12m-classification.yaml",

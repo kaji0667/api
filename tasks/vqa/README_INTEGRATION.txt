@@ -1,8 +1,6 @@
-HFSA 独立视觉问答模块（当前十二头 Q-Former v2）
+HFSA 独立视觉问答模块（五头 Q-Former v2）
 
-2026-10-13 用户选择恢复 v3：当前唯一部署模型为十二类线性答案头和原题型分类器，配套完整模型包位于 runs/vqa/qformer；短文本/单选/枚举共用，任务参数4,142,220，105张量，权重SHA256 44224d6c3e9899595e1e87c87e342b5393de7c78368c78b151fe8021185bd8f8。源码与包成对恢复，十二类/顺序/答案键门禁、partial choices、weights_only、strict及完整训练门禁保持；v4残差包不兼容且不自动回退。入口仍为prepare/train/test三脚本。详细恢复/验证和结果边界见V3_RESTORE.md；以下旧五头内容只作历史。
-
-2026-10-13更新：已合并队友十二类答案头及对应权重，当前支持全部TYPES，min_answer_count=1。API成功返回类型同步；整数计数与双图边界不变。交付逐题结果及本机验收限制见TEAM_V3_MERGE.md。以下五头训练参数/结果属于2026-10-11历史记录，不能用其验收报告证明新包在线/缓存一致。
+已恢复合并队友代码前的五头源码、原答案归一与完整模型包；默认 runs/vqa/qformer，权重SHA256 8f6ed01a42a22c7f82ff410ba4a5e6a8e56da79274b05d0eb4896408fc8cc706。支持 category/color/shape/existence/scene，数量、位置、比较等未实现任务保持显式失败。v3/v4 完整源码和模型包均在工程外独立备份，不自动回退或混用头。入口仍为 prepare/train/test 三脚本。
 
 输入为一张图片和原始完整英文问题。VQA 模块自身不依赖 API、Web 或 Ollama；官方 API 从外部调用 tasks.vqa.inference.VQAPredictor。当前 API 的唯一 VQA 架构为 hfsa_frozen_qformer_vqa_v2，fusion_backend=blip2_qformer，默认模型目录 runs/vqa/qformer。API 启动要求正式训练和全量验证收据通过门禁；短训练产物不作为服务模型。服务启动方法见 participant_api_starter-main/README.md。
 
