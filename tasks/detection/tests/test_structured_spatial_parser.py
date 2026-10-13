@@ -1,12 +1,13 @@
 """Synthetic source, scope and local HTTP contract checks; no evaluation text."""
 import json
+from copy import deepcopy
 import unittest
 from unittest.mock import Mock, patch
 import urllib.error
 
 from tasks.detection.structured_spatial_parser import (
     QwenSpatialPlanParser, SpatialParseError, source_sentences, validate_spatial_plan,
-    _complete_literal_relations,
+    _complete_literal_relations, _normalize_source_records,
 )
 
 
@@ -309,6 +310,145 @@ class SourceClauseBoundaryTests(unittest.TestCase):
         self.assertEqual(plan.references, ())
 
 
+class SourceRecoveryTests(unittest.TestCase):
+    """Recover extraction bookkeeping without guessing object identity."""
+
+    def test_unique_complete_reference_is_rebound_and_keeps_attributes(self):
+        text = ("The target is a violet kiosk. To its left is a marble bench. "
+                "Below it are two copper tanks with striped lids.")
+        raw = record("a violet kiosk", references=[
+            reference("a marble bench", 1, "left"),
+            reference("two copper tanks with striped lids", 1, "below"),
+        ])
+        before = deepcopy(raw)
+        normalized = _normalize_source_records(raw, text)
+        self.assertEqual(raw, before)
+        self.assertEqual([r["source_id"] for r in normalized["references"]], [1, 2])
+        plan = validate_spatial_plan(_complete_literal_relations(normalized, text), text)
+        self.assertEqual(plan.references[-1].description, "two copper tanks with striped lids")
+        self.assertEqual(plan.references[-1].relation, "above")
+
+    def test_invalid_ids_and_fabricated_phrases_still_reject(self):
+        text = "The target is a violet kiosk. Below it is a marble bench."
+        for index in (-1, 8, True, "0"):
+            with self.subTest(index=index), self.assertRaises(SpatialParseError):
+                _normalize_source_records(record("a violet kiosk", references=[
+                    reference("a marble bench", index, "below")]), text)
+        with self.assertRaises(SpatialParseError):
+            _normalize_source_records(record("a violet kiosk", references=[
+                reference("a sapphire watchtower", 0, "below")]), text)
+
+    def test_rebinding_rejects_multiple_sentences_or_entity_occurrences(self):
+        for remainder in (
+            "Above it is a marble bench. Below it is a marble bench.",
+            "Above it is a marble bench, and below it is a marble bench.",
+            "Above it is a marble bench, and below it is the marble bench.",
+        ):
+            with self.subTest(remainder=remainder), self.assertRaises(SpatialParseError):
+                _normalize_source_records(record("a violet kiosk", references=[
+                    reference("a marble bench", 0, "above")]), "The target is a violet kiosk. " + remainder)
+
+    def test_correctly_bound_repeated_objects_keep_their_original_ids(self):
+        text = "The target is a violet kiosk. Above it is a marble bench. Below it is a marble bench."
+        raw = record("a violet kiosk", references=[reference("a marble bench", 2, "below")])
+        self.assertEqual(_normalize_source_records(raw, text), raw)
+
+    def test_word_boundaries_do_not_rebind_a_partial_object_name(self):
+        text = "The target is a violet kiosk. Above it is a white watchtower."
+        with self.assertRaises(SpatialParseError):
+            _normalize_source_records(record("a violet kiosk", references=[
+                reference("a white tower", 0, "above")]), text)
+
+    def test_unique_target_attribute_or_container_is_not_rebound_as_a_neighbor(self):
+        cases = (
+            ("The target is a violet kiosk. Above it is a marble bench.", "kiosk", 1),
+            ("The target is a violet kiosk. It has a gold dome. Above it is a marble bench.", "a gold dome", 0),
+            ("The target is a violet kiosk inside a courtyard. Above it is a marble bench.", "a courtyard", 1),
+        )
+        for text, description, index in cases:
+            with self.subTest(description=description), self.assertRaises(SpatialParseError):
+                _normalize_source_records(record("a violet kiosk", references=[
+                    reference(description, index, "above")]), text)
+
+    def test_rebound_reference_still_cannot_borrow_the_target_position(self):
+        text = ("The target is a violet kiosk in the top-right corner of the image. "
+                "Below it is a marble bench.")
+        location = position("top_right", "top-right corner of the image")
+        raw = record("a violet kiosk", global_position=location,
+                     references=[reference("a marble bench", 0, "below", location)])
+        normalized = _normalize_source_records(raw, text)
+        self.assertEqual(normalized["references"][0]["source_id"], 1)
+        with self.assertRaises(SpatialParseError):
+            _complete_literal_relations(normalized, text)
+
+    def self_container(self, identity="the triangular flower garden", container="a flower garden"):
+        location = position("bottom_left", "bottom left of the image")
+        return record(identity, global_position=location,
+                      containers=[dict(description=container, source_id=0,
+                                       global_position=deepcopy(location), target_position=deepcopy(location))])
+
+    def test_proven_same_noun_self_container_is_removed_without_changing_target(self):
+        text = "The target is the triangular flower garden in the bottom left of the image."
+        raw = self.self_container()
+        before = deepcopy(raw)
+        normalized = _normalize_source_records(raw, text)
+        self.assertEqual(raw, before)
+        self.assertEqual(normalized, dict(raw, containers=[]))
+        plan = validate_spatial_plan(normalized, text)
+        self.assertEqual(plan.target_query, "the triangular flower garden")
+        self.assertEqual(plan.absolute_position, (-1, 1))
+
+    def test_attached_nouns_and_repeated_entities_are_not_self_containers(self):
+        cases = (
+            ("a slate depot with a tiled roof", "a tiled roof"),
+            ("a row of blue houses", "blue houses"),
+            ("a gray hut inside another gray hut", "a gray hut"),
+            ("a silver ferry parked at the pier", "the pier"),
+        )
+        for identity, container in cases:
+            with self.subTest(identity=identity):
+                text = "The target is " + identity + " in the bottom left of the image."
+                raw = self.self_container(identity, container)
+                self.assertEqual(_normalize_source_records(raw, text)["containers"], raw["containers"])
+
+    def test_real_container_and_local_position_are_preserved(self):
+        text = ("The target is a lilac cart in the lower-right part of a courtyard. "
+                "The courtyard is on the left side of the image.")
+        raw = record("a lilac cart", containers=[dict(description="a courtyard", source_id=0,
+            global_position=position("left", "left side of the image"),
+            target_position=position("bottom_right", "lower-right part of a courtyard"))])
+        normalized = _normalize_source_records(raw, text)
+        self.assertEqual(normalized, raw)
+        plan = validate_spatial_plan(normalized, text)
+        self.assertEqual(plan.containers[0].target_position, (1, 1))
+        self.assertEqual(plan.containers[0].absolute_position, (-1, None))
+
+    def test_invalid_image_as_local_position_in_a_real_container_still_rejects(self):
+        text = "The target is a lilac cart in a courtyard on the left side of the image."
+        location = position("left", "left side of the image")
+        raw = record("a lilac cart", global_position=location, containers=[dict(
+            description="a courtyard", source_id=0, global_position=location, target_position=location)])
+        normalized = _normalize_source_records(raw, text)
+        self.assertEqual(normalized["containers"], raw["containers"])
+        with self.assertRaises(SpatialParseError) as raised:
+            validate_spatial_plan(normalized, text)
+        self.assertEqual(raised.exception.code, "grounding_parser_conflicting_position")
+
+    def test_self_container_repair_does_not_erase_missing_attributes_or_unresolved(self):
+        text = ("The target is the triangular flower garden in the bottom left of the image. "
+                "It has a stone fountain.")
+        raw = self.self_container()
+        normalized = _normalize_source_records(raw, text)
+        self.assertEqual(normalized["containers"], [])
+        with self.assertRaises(SpatialParseError) as raised:
+            validate_spatial_plan(normalized, text)
+        self.assertEqual(raised.exception.code, "grounding_parser_unaccounted_text")
+        raw["unresolved"] = [1]
+        with self.assertRaises(SpatialParseError) as raised:
+            validate_spatial_plan(_normalize_source_records(raw, text), text)
+        self.assertEqual(raised.exception.code, "grounding_parser_unresolved")
+
+
 class ParserHTTPTests(unittest.TestCase):
     def call(self, outer, text="sheds"):
         response = Mock()
@@ -331,6 +471,13 @@ class ParserHTTPTests(unittest.TestCase):
         self.assertIn("sentences", payload["messages"][-1]["content"])
         self.assertNotIn("images", payload)
         self.assertEqual(request.full_url, "http://127.0.0.1:11434/api/chat")
+
+    def test_http_response_uses_source_recovery_before_original_validation(self):
+        text = "The target is a violet kiosk. Above it is a marble bench."
+        raw = record("a violet kiosk", references=[reference("a marble bench", 0, "above")])
+        plan, _ = self.call(dict(done=True, message=dict(content=json.dumps(raw))), text)
+        self.assertEqual(plan.references[0].description, "a marble bench")
+        self.assertEqual(plan.references[0].relation, "below")
 
     def test_incomplete_model_neighbors_are_completed_from_each_source_clause(self):
         text = ("The target is a purple circular gazebo. To its right, there are a gravel path and a blue pond. "

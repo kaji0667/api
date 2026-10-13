@@ -210,6 +210,100 @@ def _source(index: Any, sentences: list[str]) -> str:
     return sentences[index]
 
 
+def _literal_spans(value: str, text: str) -> list[tuple[int, int]]:
+    """Count complete literal occurrences, including the existing article rule."""
+    fragment = value.strip().rstrip(".;。；")
+    core = re.sub(r"^(?:a|an|the)\s+", "", fragment, flags=re.I)
+    pattern = r"\s+".join(re.escape(part) for part in core.split())
+    if re.match(r"[A-Za-z0-9]", core):
+        pattern = r"(?<!\w)" + pattern
+    if re.search(r"[A-Za-z0-9]$", core):
+        pattern += r"(?!\w)"
+    if core != fragment:
+        pattern = r"(?:(?:a|an|the)\s+)?" + pattern
+    return [match.span() for match in re.finditer(pattern, text, re.I)]
+
+
+def _normalize_source_records(value: Any, text: str) -> Any:
+    """Recover only uniquely sourced IDs and proven duplicate self-containers.
+
+    This does not paraphrase objects, discard unknown constraints or relax the
+    validator. Every repaired record still passes the original complete checks.
+    """
+    _fields(value, set(SCHEMA["properties"]))
+    for name, maximum in (("target_parts", 12), ("references", 16),
+                          ("containers", 4), ("frame_edges", 4), ("unresolved", 32)):
+        if not isinstance(value[name], list) or len(value[name]) > maximum:
+            raise SpatialParseError("grounding_parser_invalid_output")
+    sentences = source_sentences(text)
+    refs = []
+    for ref in value["references"]:
+        _fields(ref, {"description", "source_id", "direction", "global_position"})
+        source = _source(ref["source_id"], sentences)
+        try:
+            _quote(ref["description"], source)
+        except SpatialParseError:
+            # A malformed ID, a fabricated phrase or multiple possible owners
+            # cannot be made safe by guessing another sentence or direction.
+            if not isinstance(ref["description"], str) or not ref["description"].strip():
+                raise
+            locations = []
+            for index, sentence in enumerate(sentences):
+                try:
+                    _quote(ref["description"], sentence)
+                except SpatialParseError:
+                    continue
+                locations.extend((index, span) for span in _literal_spans(ref["description"], sentence))
+            if len(locations) != 1:
+                raise
+            index, _ = locations[0]
+            owners = [clause for clause in _relation_clauses(sentences[index])
+                      if clause.payload and _literal_spans(ref["description"], clause.payload)]
+            if len(owners) != 1:
+                # Unique text can still be the target, an attribute or a
+                # container. Require a literal target-neighbor predicate.
+                raise
+            ref = dict(ref, source_id=index)
+        refs.append(ref)
+
+    result = dict(value, references=refs)
+    if not value["containers"] or not value["target_parts"]:
+        return result
+    target_source = _source(value["target_source_id"], sentences)
+    target = _quote(value["target_parts"][0], target_source)
+    target_spans = _literal_spans(target, target_source)
+    global_position = _position(value["global_position"], text, [])
+    containers = []
+    for container in value["containers"]:
+        _fields(container, {"description", "source_id", "global_position", "target_position"})
+        source = _source(container["source_id"], sentences)
+        description = _quote(container["description"], source)
+        duplicate = False
+        # Both locations must be exactly the valid TARGET image location.
+        # Merely mentioning 'image' in a local location is never enough.
+        if (global_position is not None and len(target_spans) == 1
+                and container["source_id"] == value["target_source_id"]
+                and container["global_position"] == value["global_position"]
+                and container["target_position"] == value["global_position"]):
+            position_source = _quote(value["global_position"]["source"], target_source)
+            identity_spans = _literal_spans(description, target)
+            source_spans = _literal_spans(description, source)
+            if (re.search(r"\b(?:image|picture|frame)\b|图像|图片|画面", position_source, re.I)
+                    and len(identity_spans) == len(source_spans) == 1
+                    and not re.search(r"\b(?:another|other|inside|within)\b|内|里面|内部", target, re.I)):
+                doc = _english_dependencies()(target)
+                root = next((token for token in doc if token.dep_ == "ROOT"), None)
+                start, end = identity_spans[0]
+                # The literal container span must contain the target's noun
+                # head, not a roof, shoreline or other attached noun.
+                duplicate = (root is not None and root.pos_ in {"NOUN", "PROPN"}
+                             and start <= root.idx and root.idx + len(root.text) <= end)
+        if not duplicate:
+            containers.append(container)
+    result["containers"] = containers
+    return result
+
+
 @dataclass(frozen=True)
 class _RelationClause:
     source_id: int
@@ -628,7 +722,8 @@ class QwenSpatialPlanParser:
             outer = json.loads(raw)
             if not isinstance(outer, dict) or outer.get("done") is not True:
                 raise SpatialParseError("grounding_parser_invalid_output")
-            value = _complete_literal_relations(json.loads(outer["message"]["content"]), description)
+            value = _normalize_source_records(json.loads(outer["message"]["content"]), description)
+            value = _complete_literal_relations(value, description)
             return validate_spatial_plan(value, description)
         except SpatialParseError:
             raise
