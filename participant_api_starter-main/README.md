@@ -530,3 +530,12 @@ presence调用检测、counting调用计数、grounding调用配置指定的dete
 原完整描述检测及clip_guarded保持。两种混合编码和裁块去方位的195公开实验均未通过，未接API。12次公开图像/合成包装的真实链路，新包装与裸描述的候选/分数/索引精确一致12/12；相同格式干预旧正确7/12→新8/12，无丢失，不是官网收益或建筑/草坪能力证明。API253/253、定位110/110通过，详情见 `tasks/detection/TEXT_PROCESSING_TRIAL.md`。
 
 现有进程需在原终端Ctrl+C后重新执行 `bash scripts/serve_hfsa_api.sh` 才会读取此修复；不需要新增配置或更换Key。本轮没有启停服务或创建官网评测。
+
+
+## 2026-10-13 当前定位采用方位参照范围（覆盖历史clip_guarded说明）
+
+检测bbox默认spatial_reference：提取目标的全图方位，带入没有自身明确方位的参照查询，分别检测ABC，由相对关系的共同范围裁图，再查询目标身份/属性并以原phrase-map/Hungarian选框。目标坐标恢复到原图；范围/参照框不作为答案。解析/参照/ROI失败回完整描述全图native。API不再使用CLIP图像裁块重排，历史实验源码保留。详见tasks/detection/SPATIAL_REFERENCE_GROUNDING.md。
+
+原question传递、原模型/共享编码器/阈值/其它任务不变。默认工厂为spatial_reference；native可显式用于对照。bash scripts/serve_hfsa_api.sh迁移旧clip_guarded环境，原Key终端重启后生效。安全诊断仅固定枚举及计数，不记录题干/框/答案。
+
+完整API253测试通过，但公开对照115/80组正确数从native62/62降到58/60；没有证明整体改善，真实带方位多ABC未覆盖。规则解析仍可能unsupported并回旧流程；当前定位尚未解决，不以HTTP200或机制测试宣称准确率提升。

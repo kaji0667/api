@@ -99,6 +99,8 @@ _DIAGNOSTIC_REASONS = frozenset({
     "grounding_hybrid_selected", "grounding_unsupported_plan", "grounding_empty_candidates",
     "grounding_missing_scores", "grounding_crop_failed", "grounding_rank_failed",
     "grounding_invalid_selection",
+    "grounding_region_selected", "grounding_reference_unavailable",
+    "grounding_conflicting_region", "grounding_roi_unavailable",
 })
 _DIAGNOSTIC_ERROR_TYPES = frozenset({
     "AdapterFailure", "ValueError", "TypeError", "KeyError", "RuntimeError", "OSError",
@@ -223,16 +225,17 @@ def _prediction_diagnostic(request: dict[str, Any], image_count: int,
                 if type(value) is int and value >= 0:
                     safe[key] = value
             for key, allowed in (
-                ("grounding_policy", {"native", "clip_guarded"}),
+                ("grounding_policy", {"native", "spatial_reference"}),
                 ("grounding_parse_status", {"parsed", "unsupported"}),
-                ("grounding_outcome", {"hybrid_selected", "native_fallback"}),
+                ("grounding_outcome", {"region_selected", "native_fallback"}),
                 ("grounding_reason", _DIAGNOSTIC_REASONS),
             ):
                 value = diagnostic.get(key)
                 if isinstance(value, str) and value in allowed:
                     safe[key] = value
             for key in ("grounding_reference_count", "grounding_candidate_count",
-                        "grounding_crop_count", "grounding_elapsed_ms"):
+                        "grounding_located_reference_count", "grounding_roi_count",
+                        "grounding_detector_call_count", "grounding_elapsed_ms"):
                 value = diagnostic.get(key)
                 if type(value) is int and value >= 0:
                     safe[key] = value
@@ -321,12 +324,12 @@ class HFSAAdapter:
                  grounding_policy: str = "native", grounding_executor: Any = None) -> None:
         if grounding_backend not in {"detection", "refseg"}:
             raise ValueError("Grounding backend must be detection or refseg")
-        if grounding_policy not in {"native", "clip_guarded"}:
-            raise ValueError("Grounding policy must be native or clip_guarded")
-        if grounding_policy == "clip_guarded" and grounding_backend != "detection":
-            raise ValueError("clip_guarded requires the detection grounding backend")
-        if (grounding_policy == "clip_guarded") != (grounding_executor is not None):
-            raise ValueError("clip_guarded requires an initialized bbox task executor")
+        if grounding_policy not in {"native", "spatial_reference"}:
+            raise ValueError("Grounding policy must be native or spatial_reference")
+        if grounding_policy == "spatial_reference" and grounding_backend != "detection":
+            raise ValueError("spatial_reference requires the detection grounding backend")
+        if (grounding_policy == "spatial_reference") != (grounding_executor is not None):
+            raise ValueError("spatial_reference requires an initialized bbox task executor")
         self.classification = classification
         self.detection = detection
         self.counting = counting
@@ -341,19 +344,18 @@ class HFSAAdapter:
         grounding_backend = os.environ.get("HFSA_GROUNDING_BACKEND", "detection").strip().lower()
         if grounding_backend not in {"detection", "refseg"}:
             raise ValueError("HFSA_GROUNDING_BACKEND must be detection or refseg")
-        grounding_policy = os.environ.get("HFSA_GROUNDING_POLICY", "native").strip().lower()
-        if grounding_policy not in {"native", "clip_guarded"}:
-            raise ValueError("HFSA_GROUNDING_POLICY must be native or clip_guarded")
-        if grounding_policy == "clip_guarded" and grounding_backend != "detection":
-            raise ValueError("clip_guarded requires HFSA_GROUNDING_BACKEND=detection")
+        default_policy = "spatial_reference" if grounding_backend == "detection" else "native"
+        grounding_policy = os.environ.get("HFSA_GROUNDING_POLICY", default_policy).strip().lower()
+        if grounding_policy not in {"native", "spatial_reference"}:
+            raise ValueError("HFSA_GROUNDING_POLICY must be native or spatial_reference")
+        if grounding_policy == "spatial_reference" and grounding_backend != "detection":
+            raise ValueError("spatial_reference requires HFSA_GROUNDING_BACKEND=detection")
         max_detection_size = int(os.environ.get("HFSA_DETECTION_MAX_IMGSZ", "1600"))
         if max_detection_size < 800 or max_detection_size % 32:
             raise ValueError("HFSA_DETECTION_MAX_IMGSZ must be a multiple of 32, at least 800")
         spatial_weight = float(os.environ.get("HFSA_GROUNDING_SPATIAL_WEIGHT", "0.15"))
         if not math.isfinite(spatial_weight) or not 0 <= spatial_weight <= 1:
             raise ValueError("HFSA_GROUNDING_SPATIAL_WEIGHT must be a finite number between 0 and 1")
-        if grounding_policy == "clip_guarded" and spatial_weight != .15:
-            raise ValueError("clip_guarded requires HFSA_GROUNDING_SPATIAL_WEIGHT=0.15")
         print("HFSA API: checking local Qwen text router", flush=True)
         ensure_router_ready()
         code_dir = Path(__file__).resolve().parents[1]
@@ -398,13 +400,11 @@ class HFSAAdapter:
             spatial_weight=spatial_weight, candidate_confidence=.25,
         )
         grounding_executor = None
-        if grounding_policy == "clip_guarded":
-            from tasks.detection.bbox_grounding import BBoxGroundingExecutor
-            from tasks.detection.crop_identity import FrozenCLIPCropScorer
+        if grounding_policy == "spatial_reference":
+            from tasks.detection.spatial_reference_grounding import SpatialReferenceGroundingExecutor
 
-            scorer = FrozenCLIPCropScorer(shared_encoder.encoder.model, shared_encoder.encode_descriptions)
-            grounding_executor = BBoxGroundingExecutor(
-                detection, scorer, description_extractor=detection_text, image_converter=detection._image,
+            grounding_executor = SpatialReferenceGroundingExecutor(
+                detection, description_extractor=detection_text, image_converter=detection._image,
             )
         print("HFSA API: loading counting", flush=True)
         counting = NativeCounting(

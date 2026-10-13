@@ -14,6 +14,14 @@ export HFSA_MODELS_DIR="${HFSA_MODELS_DIR:-$hfsa_code_dir/../HFSA_models}"
 export HFSA_API_DEVICE="${HFSA_API_DEVICE:-auto}"
 export HFSA_VQA_DEVICE="${HFSA_VQA_DEVICE:-cpu}"
 export HFSA_GROUNDING_BACKEND="${HFSA_GROUNDING_BACKEND:-detection}"
+if [[ $HFSA_GROUNDING_BACKEND == detection ]]; then
+  # Migrate the previously exported experimental crop-reranking policy.
+  if [[ -z ${HFSA_GROUNDING_POLICY:-} || $HFSA_GROUNDING_POLICY == clip_guarded ]]; then
+    export HFSA_GROUNDING_POLICY=spatial_reference
+  fi
+else
+  export HFSA_GROUNDING_POLICY="${HFSA_GROUNDING_POLICY:-native}"
+fi
 export HFSA_GROUNDING_SPATIAL_WEIGHT="${HFSA_GROUNDING_SPATIAL_WEIGHT:-0.15}"
 export HFSA_VQA_BUNDLE_DIR="$hfsa_code_dir/runs/vqa/qformer"
 # Private, portable JSONL diagnostics; explicitly export an empty value to disable.

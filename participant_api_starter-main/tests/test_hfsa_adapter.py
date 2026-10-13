@@ -582,7 +582,7 @@ class BBoxPolicyAdapterTests(unittest.TestCase):
         executor.predict.return_value = self.detection.predict.return_value
         self.adapter = HFSAAdapter(
             self.classification, self.detection, self.counting, self.refseg, vqa=self.vqa,
-            grounding_policy="clip_guarded", grounding_executor=executor,
+            grounding_policy="spatial_reference", grounding_executor=executor,
         )
         return executor
 
@@ -607,9 +607,9 @@ class BBoxPolicyAdapterTests(unittest.TestCase):
     def test_constructor_rejects_policy_executor_and_backend_mismatch(self):
         for fields in (
             {"grounding_policy": "unknown"},
-            {"grounding_policy": "clip_guarded"},
+            {"grounding_policy": "spatial_reference"},
             {"grounding_policy": "native", "grounding_executor": Mock()},
-            {"grounding_backend": "refseg", "grounding_policy": "clip_guarded", "grounding_executor": Mock()},
+            {"grounding_backend": "refseg", "grounding_policy": "spatial_reference", "grounding_executor": Mock()},
         ):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 HFSAAdapter(self.classification, self.detection, self.counting, self.refseg, **fields)
@@ -618,10 +618,10 @@ class BBoxPolicyAdapterTests(unittest.TestCase):
         executor = self.guarded()
         self.select("visual_grounding")
         safe = {
-            "grounding_policy": "clip_guarded", "grounding_parse_status": "parsed",
-            "grounding_outcome": "native_fallback", "grounding_reason": "grounding_crop_failed",
+            "grounding_policy": "spatial_reference", "grounding_parse_status": "parsed",
+            "grounding_outcome": "native_fallback", "grounding_reason": "grounding_roi_unavailable",
             "grounding_reference_count": 2, "grounding_candidate_count": 2,
-            "grounding_crop_count": 0, "grounding_elapsed_ms": 123,
+            "grounding_roi_count": 0, "grounding_elapsed_ms": 123,
         }
         executor.predict.return_value.diagnostics = {
             **safe, "original_description": "private-description", "crop_scores": "private-scores",
@@ -643,7 +643,7 @@ class BBoxPolicyAdapterTests(unittest.TestCase):
             "grounding_policy": "private-policy", "grounding_parse_status": "private-description",
             "grounding_outcome": "private-outcome", "grounding_reason": "private-exception",
             "grounding_reference_count": True, "grounding_candidate_count": -1,
-            "grounding_crop_count": float("nan"), "grounding_elapsed_ms": "123",
+            "grounding_roi_count": float("nan"), "grounding_elapsed_ms": "123",
         }
         output = io.StringIO()
         with redirect_stderr(output):
@@ -867,7 +867,7 @@ class LoadingBoundaryTests(unittest.TestCase):
         return modules, factories
 
     def test_default_detection_loading_needs_no_refseg_weights_or_model_import(self):
-        modules, factories = self.fake_predictor_modules()
+        modules, factories = self.fake_grounding_modules()
         real_import = __import__
 
         def guard_import(name, *args, **kwargs):
@@ -886,8 +886,8 @@ class LoadingBoundaryTests(unittest.TestCase):
                     with patch("builtins.__import__", side_effect=guard_import), redirect_stdout(io.StringIO()):
                         adapter = HFSAAdapter.from_local()
         self.assertEqual(adapter.grounding_backend, "detection")
-        self.assertEqual(adapter.grounding_policy, "native")
-        self.assertIsNone(adapter.grounding_executor)
+        self.assertEqual(adapter.grounding_policy, "spatial_reference")
+        self.assertIsNotNone(adapter.grounding_executor)
         self.assertIsNone(adapter.refseg)
         ready.assert_called_once_with()
         factories["refseg"].assert_not_called()
@@ -908,7 +908,7 @@ class LoadingBoundaryTests(unittest.TestCase):
         self.assertIs(factories["counting"].call_args.kwargs["encoder"], factories["encoder"].return_value)
 
     def test_explicit_refseg_loading_checks_and_constructs_refseg(self):
-        modules, factories = self.fake_predictor_modules()
+        modules, factories = self.fake_grounding_modules()
         with patch.dict(os.environ, {
             "HFSA_MODELS_DIR": "/synthetic/models", "HFSA_API_DEVICE": "cpu",
             "HFSA_GROUNDING_BACKEND": "refseg",
@@ -942,7 +942,7 @@ class LoadingBoundaryTests(unittest.TestCase):
 
 
     def test_zero_spatial_weight_is_forwarded_to_native_detection(self):
-        modules, factories = self.fake_predictor_modules()
+        modules, factories = self.fake_grounding_modules()
         with patch.dict(os.environ, {"HFSA_GROUNDING_SPATIAL_WEIGHT": "0"}, clear=True), \
                 patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
                 patch("hfsa_adapter.validate_api_vqa_bundle"), \
@@ -962,21 +962,16 @@ class LoadingBoundaryTests(unittest.TestCase):
 
     def fake_grounding_modules(self):
         modules, factories = self.fake_predictor_modules()
-        factories["scorer"] = Mock()
         factories["grounding"] = Mock()
-        for name, attribute, factory in (
-            ("tasks.detection.crop_identity", "FrozenCLIPCropScorer", factories["scorer"]),
-            ("tasks.detection.bbox_grounding", "BBoxGroundingExecutor", factories["grounding"]),
-        ):
-            module = ModuleType(name)
-            setattr(module, attribute, factory)
-            modules[name] = module
+        module = ModuleType("tasks.detection.spatial_reference_grounding")
+        module.SpatialReferenceGroundingExecutor = factories["grounding"]
+        modules[module.__name__] = module
         return modules, factories
 
-    def test_guarded_loading_reuses_exact_shared_clip_and_prepares_task_immediately(self):
+    def test_spatial_loading_reuses_native_detector_and_never_loads_crop_clip(self):
         from api_task_text import detection_text
         modules, factories = self.fake_grounding_modules()
-        with patch.dict(os.environ, {"HFSA_API_DEVICE": "cpu", "HFSA_GROUNDING_POLICY": "clip_guarded"}, clear=True), \
+        with patch.dict(os.environ, {"HFSA_API_DEVICE": "cpu", "HFSA_GROUNDING_POLICY": "spatial_reference"}, clear=True), \
                 patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
                 patch("hfsa_adapter.validate_api_vqa_bundle"), patch("hfsa_adapter.Path.is_file", return_value=True), \
                 redirect_stdout(io.StringIO()):
@@ -984,22 +979,19 @@ class LoadingBoundaryTests(unittest.TestCase):
         encoder = factories["encoder"].return_value
         detection = factories["detection"].return_value
         factories["encoder"].assert_called_once()
-        factories["scorer"].assert_called_once_with(encoder.encoder.model, encoder.encode_descriptions)
         factories["grounding"].assert_called_once_with(
-            detection, factories["scorer"].return_value,
+            detection,
             description_extractor=detection_text, image_converter=detection._image,
         )
         self.assertEqual(factories["detection"].call_args.kwargs["candidate_confidence"], .25)
-        self.assertEqual(adapter.grounding_policy, "clip_guarded")
+        self.assertEqual(adapter.grounding_policy, "spatial_reference")
         self.assertIs(adapter.grounding_executor, factories["grounding"].return_value)
         self.assertEqual(adapter.grounding_backend, "detection")
 
     def test_invalid_policy_and_guarded_configuration_fail_before_router_or_weights(self):
-        configurations = [{"HFSA_GROUNDING_POLICY": value} for value in ("", "clip", "unknown")]
+        configurations = [{"HFSA_GROUNDING_POLICY": value} for value in ("", "clip", "clip_guarded", "unknown")]
         configurations += [
-            {"HFSA_GROUNDING_POLICY": "clip_guarded", "HFSA_GROUNDING_BACKEND": "refseg"},
-            {"HFSA_GROUNDING_POLICY": "clip_guarded", "HFSA_GROUNDING_SPATIAL_WEIGHT": "0"},
-            {"HFSA_GROUNDING_POLICY": "clip_guarded", "HFSA_GROUNDING_SPATIAL_WEIGHT": "0.1501"},
+            {"HFSA_GROUNDING_POLICY": "spatial_reference", "HFSA_GROUNDING_BACKEND": "refseg"},
         ]
         for configuration in configurations:
             with self.subTest(configuration=configuration), patch.dict(os.environ, configuration, clear=True), \
@@ -1009,18 +1001,18 @@ class LoadingBoundaryTests(unittest.TestCase):
                 ready.assert_not_called()
                 is_file.assert_not_called()
 
-    def test_guarded_scorer_initialization_failure_prevents_readiness_and_no_native_fallback(self):
+    def test_spatial_executor_initialization_failure_prevents_readiness(self):
         modules, factories = self.fake_grounding_modules()
-        error = ValueError("frozen CLIP validation failed")
-        factories["scorer"].side_effect = error
-        with patch.dict(os.environ, {"HFSA_GROUNDING_POLICY": "clip_guarded"}, clear=True), \
+        error = ValueError("spatial reference validation failed")
+        factories["grounding"].side_effect = error
+        with patch.dict(os.environ, {"HFSA_GROUNDING_POLICY": "spatial_reference"}, clear=True), \
                 patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
                 patch("hfsa_adapter.validate_api_vqa_bundle"), patch("hfsa_adapter.Path.is_file", return_value=True), \
                 redirect_stdout(io.StringIO()):
             with self.assertRaises(ValueError) as context:
                 HFSAAdapter.from_local()
         self.assertIs(context.exception, error)
-        factories["grounding"].assert_not_called()
+        factories["grounding"].assert_called_once()
         factories["counting"].assert_not_called()
         factories["vqa"].assert_not_called()
 
