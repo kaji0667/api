@@ -549,3 +549,17 @@ presence调用检测、counting调用计数、grounding调用配置指定的dete
 复用 `HFSA_ROUTER_URL/MODEL/TIMEOUT`，仅允许本地 loopback；没有新模型、CLIP 图像裁块重排或检测阈值变化。诊断新增固定 `grounding_parser`、解析失败原因及容器计数，不记录提取文本。来源与属性校验是守卫，不是对所有指代关系的正确性证明。
 
 已完成 API 253 项回归、新诊断 11 项及检测 155 项验证。历史 26 条去重描述的本机 Qwen 实测仍有大量拒绝；四边参照描述已有完整提取，不能据此声称官网 IoU 或分数提高。API 需在原 Key 终端 Ctrl+C 后运行 `bash scripts/serve_hfsa_api.sh` 才读取新代码；本次没有重启服务或提交官网评测。
+
+### 本次测评专用：直接输出参照框外接坐标
+
+仅为本次测评显式设置 `HFSA_GROUNDING_POLICY=reference_enclosure`。默认 `spatial_reference` 和通用定位规则保持原行为。该模式复用同一文本解析、方位参照查询及原图 phrase-map/Hungarian 选框；全部实体参照成功后直接返回 `[min(x1), min(y1), max(x2), max(y2)]`，不求关系半平面交集、不裁图、不检测目标。容器框和图像边缘不作为外接框成员。使用独立坐标结果，没有虚构目标检测分数或短语匹配索引；API 检查原图尺寸和框有效性，左上向下、右下向上取整。
+
+解析失败、无实体参照或任一参照不可用时，保留原完整描述的全图 native 回退，不输出部分参照的外接框。安全诊断用 `enclosure_selected` / `grounding_reference_enclosed` 区分直接输出，成功路径 `grounding_roi_count=0`。外接框不能证明参照识别正确，也不保证测评分数提高；不影响 presence、计数、VQA 或 RefSeg。
+
+在原 API Key 所在的 WSL 终端启用本次测评模式：
+
+```bash
+HFSA_GROUNDING_POLICY=reference_enclosure bash scripts/serve_hfsa_api.sh
+```
+
+完成测评后以 `HFSA_GROUNDING_POLICY=spatial_reference bash scripts/serve_hfsa_api.sh` 启动即可恢复默认策略。上述命令不改持久配置；已经运行的 API 须由原终端重启后才读取新源码和策略。

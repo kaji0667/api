@@ -608,11 +608,51 @@ class BBoxPolicyAdapterTests(unittest.TestCase):
         for fields in (
             {"grounding_policy": "unknown"},
             {"grounding_policy": "spatial_reference"},
+            {"grounding_policy": "reference_enclosure"},
             {"grounding_policy": "native", "grounding_executor": Mock()},
             {"grounding_backend": "refseg", "grounding_policy": "spatial_reference", "grounding_executor": Mock()},
+            {"grounding_backend": "refseg", "grounding_policy": "reference_enclosure", "grounding_executor": Mock()},
         ):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 HFSAAdapter(self.classification, self.detection, self.counting, self.refseg, **fields)
+
+    def test_evaluation_enclosure_uses_direct_bbox_contract_and_presence_stays_native(self):
+        from tasks.detection.spatial_reference_grounding import ReferenceEnclosureResult
+
+        executor = Mock()
+        executor.predict.return_value = ReferenceEnclosureResult((1.2, 2.8, 70.1, 35.2), (40, 80))
+        self.adapter = HFSAAdapter(self.classification, self.detection, self.counting, self.refseg,
+                                   grounding_policy="reference_enclosure", grounding_executor=executor)
+        self.select("visual_grounding")
+        self.assertEqual(self.predict(request("source", "bbox", image_height=40, image_width=80)),
+                         [1, 2, 71, 36])
+        executor.predict.assert_called_once_with(self.image, "source")
+        self.detection.predict.assert_not_called()
+        self.select("presence")
+        self.assertEqual(self.predict(request("source", "enum", constraint={"values": ["Yes", "No"]})), "Yes")
+        self.detection.predict.assert_called_once_with(self.image, "source", require_grounding=False)
+        self.assertEqual(executor.predict.call_count, 1)
+
+    def test_evaluation_enclosure_validates_shape_finiteness_area_bounds_and_size(self):
+        from tasks.detection.spatial_reference_grounding import ReferenceEnclosureResult
+
+        for box in ((1, 2, 3), (1, 2, np.nan, 4), (1, 2, np.inf, 4),
+                    (3, 2, 1, 4), (1, 2, 1, 4), (-1, 2, 3, 4), (1, 2, 81, 4), (1, 2, 3, 41)):
+            with self.subTest(box=box), self.assertRaises(AdapterFailure) as raised:
+                HFSAAdapter._reference_enclosure_box(ReferenceEnclosureResult(box, (40, 80)), 40, 80)
+            self.assertEqual(raised.exception.code, "invalid_reference_enclosure")
+        with self.assertRaises(AdapterFailure) as raised:
+            HFSAAdapter._reference_enclosure_box(ReferenceEnclosureResult((1, 2, 3, 4), (80, 40)), 40, 80)
+        self.assertEqual(raised.exception.code, "image_dimensions_mismatch")
+
+    def test_evaluation_failure_result_still_uses_validated_native_bbox(self):
+        executor = Mock()
+        executor.predict.return_value = self.detection.predict.return_value
+        self.adapter = HFSAAdapter(self.classification, self.detection, self.counting, self.refseg,
+                                   grounding_policy="reference_enclosure", grounding_executor=executor)
+        self.select("visual_grounding")
+        self.assertEqual(self.predict(request("source", "bbox", image_height=40, image_width=80)),
+                         [30, 20, 71, 36])
 
     def test_guarded_diagnostic_emits_only_fixed_values_and_numeric_allowlist(self):
         executor = self.guarded()
@@ -992,10 +1032,25 @@ class LoadingBoundaryTests(unittest.TestCase):
         self.assertIs(adapter.grounding_executor, factories["grounding"].return_value)
         self.assertEqual(adapter.grounding_backend, "detection")
 
+    def test_evaluation_policy_is_explicit_and_enables_direct_reference_enclosure(self):
+        modules, factories = self.fake_grounding_modules()
+        with patch.dict(os.environ, {"HFSA_GROUNDING_POLICY": "reference_enclosure"}, clear=True), \
+                patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
+                patch("hfsa_adapter.validate_api_vqa_bundle"), patch("hfsa_adapter.Path.is_file", return_value=True), \
+                redirect_stdout(io.StringIO()):
+            adapter = HFSAAdapter.from_local()
+        self.assertEqual(adapter.grounding_policy, "reference_enclosure")
+        self.assertEqual(adapter.grounding_backend, "detection")
+        self.assertTrue(factories["grounding"].call_args.kwargs["enclose_references"])
+        self.assertIs(factories["grounding"].call_args.args[0], factories["detection"].return_value)
+        self.assertIs(adapter.grounding_executor, factories["grounding"].return_value)
+        factories["refseg"].assert_not_called()
+
     def test_invalid_policy_and_guarded_configuration_fail_before_router_or_weights(self):
         configurations = [{"HFSA_GROUNDING_POLICY": value} for value in ("", "clip", "clip_guarded", "unknown")]
         configurations += [
             {"HFSA_GROUNDING_POLICY": "spatial_reference", "HFSA_GROUNDING_BACKEND": "refseg"},
+            {"HFSA_GROUNDING_POLICY": "reference_enclosure", "HFSA_GROUNDING_BACKEND": "refseg"},
         ]
         for configuration in configurations:
             with self.subTest(configuration=configuration), patch.dict(os.environ, configuration, clear=True), \

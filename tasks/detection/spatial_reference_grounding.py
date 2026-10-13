@@ -1,11 +1,11 @@
-"""Locate positioned references, derive a region, then match the target there.
+"""Locate positioned references before the configured bbox output step.
 
-Uses the submitted detector and its phrase-map assignment only. Reference boxes
-constrain the search; they never become target boxes. No crop-image CLIP scores.
+The default searches for the target. The opt-in evaluation mode returns the
+reference enclosure directly. Both reuse the submitted phrase-map assignment.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import re
 import time
 from typing import Any, Callable
@@ -31,6 +31,15 @@ _EN_LOCATION = re.compile(
     r"^(?:it|the target|this target|the object)\s+is\s+"
     r"(?:(?:located|situated)\s+)?((?:in|at|on)\s+.+)$", re.I,
 )
+
+
+@dataclass(frozen=True)
+class ReferenceEnclosureResult:
+    """Evaluation bbox geometry; this is not a scored target detection."""
+
+    bbox: tuple[float, float, float, float]
+    original_size: tuple[int, int]
+    diagnostics: dict[str, Any] | None = None
 
 
 def _identity(text: str) -> str:
@@ -158,7 +167,8 @@ def _match(result: Any, boxes: np.ndarray, region: list[float], *,
 
 class SpatialReferenceGroundingExecutor:
     def __init__(self, native: Any, *, description_extractor: Callable,
-                 image_converter: Callable, plan_parser: Callable | None = None) -> None:
+                 image_converter: Callable, plan_parser: Callable | None = None,
+                 enclose_references: bool = False) -> None:
         if (not callable(getattr(native, "predict", None)) or not callable(description_extractor)
                 or not callable(image_converter)):
             raise ValueError("spatial_reference requires native detection and input preparation")
@@ -166,6 +176,9 @@ class SpatialReferenceGroundingExecutor:
         self.plan_parser = plan_parser if plan_parser is not None else parse_spatial_reference_plan
         if not callable(self.plan_parser):
             raise ValueError("spatial_reference requires a callable text parser")
+        if type(enclose_references) is not bool:
+            raise ValueError("enclose_references must be a boolean")
+        self.enclose_references = enclose_references
         self.parser_name = "qwen" if getattr(self.plan_parser, "name", None) == "qwen" else "rules"
 
     def predict(self, image: Any, original_question: str) -> Any:
@@ -181,19 +194,24 @@ class SpatialReferenceGroundingExecutor:
 
         def finished(result: Any, reason: str, selected: bool = False) -> Any:
             diagnostics = dict(result.diagnostics or {})
+            enclosure = isinstance(result, ReferenceEnclosureResult)
             diagnostics.update(
-                grounding_policy="spatial_reference", grounding_parse_status="parsed" if plan else "unsupported",
+                grounding_policy="reference_enclosure" if self.enclose_references else "spatial_reference",
+                grounding_parse_status="parsed" if plan else "unsupported",
                 grounding_parser=self.parser_name,
-                grounding_outcome="region_selected" if selected else "native_fallback", grounding_reason=reason,
+                grounding_outcome=("enclosure_selected" if enclosure else
+                                   "region_selected" if selected else "native_fallback"), grounding_reason=reason,
                 grounding_reference_count=reference_count, grounding_located_reference_count=located,
-                grounding_candidate_count=len(result.boxes), grounding_roi_count=roi_count,
+                grounding_candidate_count=0 if enclosure else len(result.boxes), grounding_roi_count=roi_count,
                 grounding_detector_call_count=calls,
                 grounding_container_count=container_count, grounding_located_container_count=located_containers,
                 grounding_elapsed_ms=round((time.monotonic() - started) * 1000),
             )
             return replace(result, diagnostics=diagnostics)
 
-        if plan is not None and not (plan.references or plan.containers or plan.absolute_position or plan.frame_edges):
+        if plan is not None and self.enclose_references and not plan.references:
+            reason = "grounding_no_references"
+        elif plan is not None and not (plan.references or plan.containers or plan.absolute_position or plan.frame_edges):
             reason = "grounding_no_spatial_constraints"
         elif plan is not None:
             try:
@@ -233,11 +251,17 @@ class SpatialReferenceGroundingExecutor:
                     anchor = boxes[index].tolist()
                     anchors.append(anchor)
                     located += 1
-                    for relation in getattr(spec, "relations", ()) or (spec.relation,):
-                        constraint = _relation_region(anchor, relation, width, height)
-                        region = [max(region[0], constraint[0]), max(region[1], constraint[1]),
-                                  min(region[2], constraint[2]), min(region[3], constraint[3])]
+                    if not self.enclose_references:
+                        for relation in getattr(spec, "relations", ()) or (spec.relation,):
+                            constraint = _relation_region(anchor, relation, width, height)
+                            region = [max(region[0], constraint[0]), max(region[1], constraint[1]),
+                                      min(region[2], constraint[2]), min(region[3], constraint[3])]
                 if located == reference_count and located_containers == container_count:
+                    if self.enclose_references:
+                        bbox = (min(box[0] for box in anchors), min(box[1] for box in anchors),
+                                max(box[2] for box in anchors), max(box[3] for box in anchors))
+                        return finished(ReferenceEnclosureResult(bbox, (height, width)),
+                                        "grounding_reference_enclosed")
                     reason = "grounding_conflicting_region"
                     if region[2] > region[0] and region[3] > region[1]:
                         roi = _expanded_roi(region, width, height)

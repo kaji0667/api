@@ -159,6 +159,29 @@ class PersistentDiagnosticTests(unittest.TestCase):
             thread.join()
         self.assertEqual(sorted(row["synthetic"] for row in self.rows()), list(range(8)))
 
+    def test_evaluation_enclosure_diagnostics_keep_fixed_values_without_bbox_or_source(self):
+        from tasks.detection.spatial_reference_grounding import ReferenceEnclosureResult
+
+        executor = Mock()
+        executor.predict.return_value = ReferenceEnclosureResult((1, 2, 20, 30), (40, 80),
+            diagnostics=dict(grounding_policy="reference_enclosure", grounding_parser="qwen",
+                             grounding_parse_status="parsed", grounding_outcome="enclosure_selected",
+                             grounding_reason="grounding_reference_enclosed", grounding_reference_count=4,
+                             grounding_located_reference_count=4, grounding_roi_count=0,
+                             grounding_detector_call_count=4, bbox=[1, 2, 20, 30],
+                             source="private-source", confidence=.99))
+        self.adapter = HFSAAdapter(None, self.detection, None, None,
+                                   grounding_policy="reference_enclosure", grounding_executor=executor)
+        self.predict("visual_grounding", "bbox", image_width=80, image_height=40)
+        safe = self.rows()[0]["detection_inference"]
+        self.assertEqual(safe["grounding_policy"], "reference_enclosure")
+        self.assertEqual(safe["grounding_outcome"], "enclosure_selected")
+        self.assertEqual(safe["grounding_reason"], "grounding_reference_enclosed")
+        self.assertEqual(safe["grounding_roi_count"], 0)
+        self.assertNotIn("bbox", safe)
+        self.assertNotIn("confidence", safe)
+        self.assertNotIn("private", self.log.read_text(encoding="utf-8"))
+
     def test_spatial_parser_diagnostics_keep_fixed_reason_and_counts_only(self):
         import numpy as np
         self.detection.predict.return_value = SimpleNamespace(

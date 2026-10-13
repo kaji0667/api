@@ -100,6 +100,7 @@ _DIAGNOSTIC_REASONS = frozenset({
     "grounding_missing_scores", "grounding_crop_failed", "grounding_rank_failed",
     "grounding_invalid_selection",
     "grounding_region_selected", "grounding_reference_unavailable",
+    "grounding_reference_enclosed", "grounding_no_references", "invalid_reference_enclosure",
     "grounding_conflicting_region", "grounding_roi_unavailable",
     "grounding_container_unavailable", "grounding_no_spatial_constraints",
     "grounding_parser_invalid_output", "grounding_parser_source_mismatch",
@@ -230,10 +231,10 @@ def _prediction_diagnostic(request: dict[str, Any], image_count: int,
                 if type(value) is int and value >= 0:
                     safe[key] = value
             for key, allowed in (
-                ("grounding_policy", {"native", "spatial_reference"}),
+                ("grounding_policy", {"native", "spatial_reference", "reference_enclosure"}),
                 ("grounding_parse_status", {"parsed", "unsupported"}),
                 ("grounding_parser", {"qwen", "rules"}),
-                ("grounding_outcome", {"region_selected", "native_fallback"}),
+                ("grounding_outcome", {"region_selected", "native_fallback", "enclosure_selected"}),
                 ("grounding_reason", _DIAGNOSTIC_REASONS),
             ):
                 value = diagnostic.get(key)
@@ -331,12 +332,12 @@ class HFSAAdapter:
                  grounding_policy: str = "native", grounding_executor: Any = None) -> None:
         if grounding_backend not in {"detection", "refseg"}:
             raise ValueError("Grounding backend must be detection or refseg")
-        if grounding_policy not in {"native", "spatial_reference"}:
-            raise ValueError("Grounding policy must be native or spatial_reference")
-        if grounding_policy == "spatial_reference" and grounding_backend != "detection":
-            raise ValueError("spatial_reference requires the detection grounding backend")
-        if (grounding_policy == "spatial_reference") != (grounding_executor is not None):
-            raise ValueError("spatial_reference requires an initialized bbox task executor")
+        if grounding_policy not in {"native", "spatial_reference", "reference_enclosure"}:
+            raise ValueError("Grounding policy must be native, spatial_reference or reference_enclosure")
+        if grounding_policy != "native" and grounding_backend != "detection":
+            raise ValueError("Reference grounding requires the detection grounding backend")
+        if (grounding_policy != "native") != (grounding_executor is not None):
+            raise ValueError("Reference grounding requires an initialized bbox task executor")
         self.classification = classification
         self.detection = detection
         self.counting = counting
@@ -353,10 +354,10 @@ class HFSAAdapter:
             raise ValueError("HFSA_GROUNDING_BACKEND must be detection or refseg")
         default_policy = "spatial_reference" if grounding_backend == "detection" else "native"
         grounding_policy = os.environ.get("HFSA_GROUNDING_POLICY", default_policy).strip().lower()
-        if grounding_policy not in {"native", "spatial_reference"}:
-            raise ValueError("HFSA_GROUNDING_POLICY must be native or spatial_reference")
-        if grounding_policy == "spatial_reference" and grounding_backend != "detection":
-            raise ValueError("spatial_reference requires HFSA_GROUNDING_BACKEND=detection")
+        if grounding_policy not in {"native", "spatial_reference", "reference_enclosure"}:
+            raise ValueError("HFSA_GROUNDING_POLICY must be native, spatial_reference or reference_enclosure")
+        if grounding_policy != "native" and grounding_backend != "detection":
+            raise ValueError("Reference grounding requires HFSA_GROUNDING_BACKEND=detection")
         max_detection_size = int(os.environ.get("HFSA_DETECTION_MAX_IMGSZ", "1600"))
         if max_detection_size < 800 or max_detection_size % 32:
             raise ValueError("HFSA_DETECTION_MAX_IMGSZ must be a multiple of 32, at least 800")
@@ -407,13 +408,14 @@ class HFSAAdapter:
             spatial_weight=spatial_weight, candidate_confidence=.25,
         )
         grounding_executor = None
-        if grounding_policy == "spatial_reference":
+        if grounding_policy != "native":
             from tasks.detection.spatial_reference_grounding import SpatialReferenceGroundingExecutor
             from tasks.detection.structured_spatial_parser import QwenSpatialPlanParser
 
+            evaluation_options = {"enclose_references": True} if grounding_policy == "reference_enclosure" else {}
             grounding_executor = SpatialReferenceGroundingExecutor(
                 detection, description_extractor=detection_text, image_converter=detection._image,
-                plan_parser=QwenSpatialPlanParser(),
+                plan_parser=QwenSpatialPlanParser(), **evaluation_options,
             )
         print("HFSA API: loading counting", flush=True)
         counting = NativeCounting(
@@ -578,6 +580,24 @@ class HFSAAdapter:
         return matches[0]
 
     @staticmethod
+    def _reference_enclosure_box(result: Any, height: int, width: int) -> list[int]:
+        import numpy as np
+
+        try:
+            box = np.asarray(result.bbox, dtype=np.float64)
+            original_size = tuple(result.original_size)
+        except (AttributeError, TypeError, ValueError):
+            raise AdapterFailure("invalid_reference_enclosure", "Invalid reference enclosure") from None
+        if original_size != (height, width):
+            raise AdapterFailure("image_dimensions_mismatch", "Request dimensions differ from the original image")
+        if (box.shape != (4,) or not np.isfinite(box).all() or (box < 0).any()
+                or (box > [width, height, width, height]).any()
+                or box[2] <= box[0] or box[3] <= box[1]):
+            raise AdapterFailure("invalid_reference_enclosure", "Invalid reference enclosure")
+        return [int(np.floor(box[0])), int(np.floor(box[1])),
+                int(np.ceil(box[2])), int(np.ceil(box[3]))]
+
+    @staticmethod
     def _detection_box(result: Any, height: int, width: int) -> list[int]:
         import numpy as np
 
@@ -656,6 +676,11 @@ class HFSAAdapter:
                       if self.grounding_executor is not None else self.detection.predict(image, model_text))
             if execution_metadata is not None:
                 execution_metadata["detection_inference"] = getattr(result, "diagnostics", None)
+            if self.grounding_policy == "reference_enclosure":
+                from tasks.detection.spatial_reference_grounding import ReferenceEnclosureResult
+
+                if isinstance(result, ReferenceEnclosureResult):
+                    return self._reference_enclosure_box(result, height, width)
             return self._detection_box(result, height, width)
         if execution_metadata is not None:
             execution_metadata["executor"] = "refseg"
