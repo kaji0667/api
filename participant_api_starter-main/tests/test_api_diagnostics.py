@@ -201,6 +201,36 @@ class PersistentDiagnosticTests(unittest.TestCase):
         self.assertEqual(safe["grounding_container_count"], 1)
         self.assertNotIn("private", self.log.read_text(encoding="utf-8"))
 
+    def test_reference_attempts_keep_numbers_and_fixed_statuses_without_descriptions_or_boxes(self):
+        from tasks.detection.spatial_reference_grounding import ReferenceEnclosureResult
+
+        executor = Mock()
+        executor.predict.return_value = ReferenceEnclosureResult((1, 2, 20, 30), (40, 80), diagnostics={
+            "grounding_reference_results": [
+                dict(reference_index=1, status="selected", candidate_count=2, max_confidence=.876543219,
+                     selected_index=1, query="private-query", description="private-description",
+                     selected_bbox_original_xyxy=[1, 2, 20, 30]),
+                dict(reference_index=2, status="no_candidates", candidate_count=0, max_confidence=.01,
+                     selected_index=None),
+                dict(reference_index=3, status="error", failure_stage="matching", error="private-error",
+                     candidate_count=True, selected_index=-1, max_confidence=float("nan")),
+                dict(reference_index=True, status="selected"),
+                dict(reference_index=4, status="private-status"),
+                "private-malformed-attempt",
+            ],
+        })
+        self.adapter = HFSAAdapter(None, self.detection, None, None,
+                                   grounding_policy="reference_enclosure", grounding_executor=executor)
+        self.predict("visual_grounding", "bbox", image_width=80, image_height=40)
+        attempts = self.rows()[0]["detection_inference"]["grounding_reference_results"]
+        self.assertEqual(attempts, [
+            dict(reference_index=1, status="selected", candidate_count=2, max_confidence=.87654322, selected_index=1),
+            dict(reference_index=2, status="no_candidates", candidate_count=0, max_confidence=.01),
+            dict(reference_index=3, status="error", failure_stage="matching"),
+        ])
+        self.assertNotIn("private", self.log.read_text(encoding="utf-8"))
+        self.assertNotIn("selected_bbox_original_xyxy", str(attempts))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -247,6 +247,29 @@ def _prediction_diagnostic(request: dict[str, Any], image_count: int,
                 value = diagnostic.get(key)
                 if type(value) is int and value >= 0:
                     safe[key] = value
+            attempts = diagnostic.get("grounding_reference_results")
+            if isinstance(attempts, (list, tuple)):
+                safe_attempts = []
+                for attempt in attempts:
+                    if not isinstance(attempt, dict):
+                        continue
+                    ordinal, status = attempt.get("reference_index"), attempt.get("status")
+                    if (type(ordinal) is not int or ordinal < 1 or not isinstance(status, str)
+                            or status not in {"selected", "no_candidates", "match_failed", "error"}):
+                        continue
+                    item = {"reference_index": ordinal, "status": status}
+                    for key in ("candidate_count", "selected_index"):
+                        value = attempt.get(key)
+                        if type(value) is int and value >= 0:
+                            item[key] = value
+                    maximum = attempt.get("max_confidence")
+                    if type(maximum) in {int, float} and 0 <= maximum <= 1:
+                        item["max_confidence"] = round(float(maximum), 8)
+                    stage = attempt.get("failure_stage")
+                    if isinstance(stage, str) and stage in {"query", "detection", "candidates", "matching"}:
+                        item["failure_stage"] = stage
+                    safe_attempts.append(item)
+                safe["grounding_reference_results"] = safe_attempts
             if safe:
                 record["detection_inference"] = safe
     encoded = json.dumps(record, ensure_ascii=True, allow_nan=False, separators=(",", ":"))

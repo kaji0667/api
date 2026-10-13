@@ -129,7 +129,7 @@ class SpatialReferenceTests(unittest.TestCase):
 
     def test_missing_reference_and_conflicting_geometry_fall_back_without_roi(self):
         for values, reason in (
-            ([result([])], "grounding_reference_unavailable"),
+            ([result([]), result([[10, 40, 20, 60]])], "grounding_reference_unavailable"),
             ([result([[80, 40, 100, 60]]), result([[10, 40, 20, 60]])], "grounding_conflicting_region"),
         ):
             with self.subTest(reason=reason):
@@ -317,6 +317,82 @@ class ReferenceEnclosureTests(unittest.TestCase):
         self.assertEqual(output.diagnostics["grounding_located_reference_count"], 1)
         self.assertEqual(output.diagnostics["grounding_roi_count"], 0)
         self.assertEqual(output.diagnostics["grounding_reason"], "grounding_reference_unavailable")
+
+    def test_all_references_attempted_after_empty_unmatched_and_detection_error(self):
+        self.use([PositionedReferenceSpec("road", "below"),
+                  PositionedReferenceSpec("yard", "above", (-1, -1)),
+                  PositionedReferenceSpec("trees", "near"),
+                  PositionedReferenceSpec("pond", "near")])
+        empty = replace(result([]), diagnostics={"max_confidence": .012})
+        unmatched = replace(result([[150, 80, 180, 95]]), diagnostics={"max_confidence": .9})
+        accepted = replace(result([[20, 30, 80, 90]]), diagnostics={"max_confidence": .8})
+        baseline = replace(result([[40, 50, 60, 70]]), diagnostics={"max_confidence": .99})
+        self.native.predict.side_effect = [empty, unmatched, RuntimeError("private-error-text"), accepted, baseline]
+        with patch("tasks.detection.spatial_reference_grounding._expanded_roi", side_effect=AssertionError):
+            output = self.executor.predict(self.image, "original question")
+        self.assertNotIsInstance(output, ReferenceEnclosureResult)
+        np.testing.assert_array_equal(output.boxes, baseline.boxes)
+        self.assertEqual([call.args[1] for call in self.native.predict.call_args_list],
+                         ["road", "yard in the top-left corner of the image", "trees", "pond", "original question"])
+        attempts = output.diagnostics["grounding_reference_results"]
+        self.assertEqual([attempt["reference_index"] for attempt in attempts], [1, 2, 3, 4])
+        self.assertEqual([attempt["status"] for attempt in attempts],
+                         ["no_candidates", "match_failed", "error", "selected"])
+        self.assertEqual([attempt["candidate_count"] for attempt in attempts], [0, 1, None, 1])
+        self.assertEqual([attempt["max_confidence"] for attempt in attempts], [.012, .9, None, .8])
+        self.assertEqual(attempts[2]["failure_stage"], "detection")
+        self.assertEqual(attempts[3]["selected_index"], 0)
+        self.assertEqual(attempts[3]["selected_bbox_original_xyxy"], [20, 30, 80, 90])
+        self.assertEqual(attempts[0]["query"], "road")
+        self.assertIsNone(attempts[0]["selected_bbox_original_xyxy"])
+        self.assertNotIn("private-error-text", str(output.diagnostics))
+        self.assertEqual(output.diagnostics["grounding_located_reference_count"], 1)
+        self.assertEqual(output.diagnostics["grounding_detector_call_count"], 5)
+        self.assertEqual(output.diagnostics["grounding_reason"], "grounding_reference_unavailable")
+        self.assertEqual(output.diagnostics["grounding_roi_count"], 0)
+
+    def test_candidate_and_matcher_exceptions_do_not_skip_later_references(self):
+        for invalid, phase in (
+            (replace(result([[20, 30, 80, 90]]), original_size=(90, 200)), "candidates"),
+            (replace(result([[20, 30, 80, 90]]), baseline_adjusted_scores=np.array([np.nan])), "matching"),
+        ):
+            with self.subTest(phase=phase):
+                self.native.reset_mock()
+                self.use([PositionedReferenceSpec("road", "below"), PositionedReferenceSpec("yard", "above")])
+                baseline = result([[40, 50, 60, 70]])
+                self.native.predict.side_effect = [invalid, result([[20, 30, 80, 90]]), baseline]
+                output = self.executor.predict(self.image, "original question")
+                attempts = output.diagnostics["grounding_reference_results"]
+                self.assertEqual([attempt["status"] for attempt in attempts], ["error", "selected"])
+                self.assertEqual(attempts[0]["failure_stage"], phase)
+                self.assertEqual(self.native.predict.call_count, 3)
+                np.testing.assert_array_equal(output.boxes, baseline.boxes)
+
+    def test_failed_container_still_observes_all_references_and_preserves_fallback(self):
+        for unavailable in (result([]), RuntimeError("private-container-error")):
+            with self.subTest(unavailable=type(unavailable).__name__):
+                self.native.reset_mock()
+                self.use([PositionedReferenceSpec("road", "below"), PositionedReferenceSpec("yard", "above")],
+                         containers=(ContainerSpec("a park", None, (-1, -1)),))
+                baseline = result([[40, 50, 60, 70]])
+                self.native.predict.side_effect = [unavailable, result([[10, 20, 30, 40]]),
+                                                   result([[40, 50, 80, 90]]), baseline]
+                output = self.executor.predict(self.image, "original question")
+                self.assertEqual(output.diagnostics["grounding_located_reference_count"], 2)
+                self.assertEqual(output.diagnostics["grounding_detector_call_count"], 4)
+                self.assertEqual(output.diagnostics["grounding_reason"], "grounding_container_unavailable")
+                self.assertNotIsInstance(output, ReferenceEnclosureResult)
+                np.testing.assert_array_equal(output.boxes, baseline.boxes)
+
+    def test_final_original_description_fallback_error_still_propagates(self):
+        self.use([PositionedReferenceSpec("road", "below"), PositionedReferenceSpec("yard", "above")])
+        failure = RuntimeError("fallback error")
+        self.native.predict.side_effect = [result([]), result([[20, 30, 80, 90]]), failure]
+        with self.assertRaises(RuntimeError) as caught:
+            self.executor.predict(self.image, "original question")
+        self.assertIs(caught.exception, failure)
+        self.native.predict.assert_called_with(self.image, "original question")
+        self.assertEqual(self.native.predict.call_count, 3)
 
     def test_no_entities_does_not_enclose_container_or_frame_or_crop_target(self):
         for fields in ({}, {"frame_edges": ("left",)},

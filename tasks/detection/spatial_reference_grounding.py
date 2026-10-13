@@ -191,6 +191,7 @@ class SpatialReferenceGroundingExecutor:
             plan, reason = None, error.code
         reference_count, located, roi_count, calls = len(plan.references) if plan else 0, 0, 0, 0
         container_count, located_containers = len(plan.containers) if plan else 0, 0
+        reference_results = []
 
         def finished(result: Any, reason: str, selected: bool = False) -> Any:
             diagnostics = dict(result.diagnostics or {})
@@ -206,6 +207,7 @@ class SpatialReferenceGroundingExecutor:
                 grounding_detector_call_count=calls,
                 grounding_container_count=container_count, grounding_located_container_count=located_containers,
                 grounding_elapsed_ms=round((time.monotonic() - started) * 1000),
+                grounding_reference_results=reference_results,
             )
             return replace(result, diagnostics=diagnostics)
 
@@ -221,41 +223,69 @@ class SpatialReferenceGroundingExecutor:
                 anchors = []
                 reference_position = plan.absolute_position
                 reason = "grounding_container_unavailable"
-                for container in plan.containers:
-                    query, position = positioned_reference(ReferenceSpec(container.description, "near"),
-                                                           container.absolute_position)
-                    calls += 1
-                    result = self.native.predict(original, query, return_phrase_scores=True)
-                    boxes = _candidates(result, (height, width))
-                    index = _match(result, boxes, _absolute_region(position, width, height), adjusted=True)
-                    if index is None:
-                        break
-                    x1, y1, x2, y2 = boxes[index].tolist()
-                    local = _absolute_region(container.target_position, x2 - x1, y2 - y1)
-                    constraint = [local[0] + x1, local[1] + y1, local[2] + x1, local[3] + y1]
-                    region = [max(region[0], constraint[0]), max(region[1], constraint[1]),
-                              min(region[2], constraint[2]), min(region[3], constraint[3])]
-                    located_containers += 1
-                    if reference_position is None:
-                        reference_position = container.absolute_position
+                try:
+                    for container in plan.containers:
+                        query, position = positioned_reference(ReferenceSpec(container.description, "near"),
+                                                               container.absolute_position)
+                        calls += 1
+                        result = self.native.predict(original, query, return_phrase_scores=True)
+                        boxes = _candidates(result, (height, width))
+                        index = _match(result, boxes, _absolute_region(position, width, height), adjusted=True)
+                        if index is None:
+                            break
+                        x1, y1, x2, y2 = boxes[index].tolist()
+                        local = _absolute_region(container.target_position, x2 - x1, y2 - y1)
+                        constraint = [local[0] + x1, local[1] + y1, local[2] + x1, local[3] + y1]
+                        region = [max(region[0], constraint[0]), max(region[1], constraint[1]),
+                                  min(region[2], constraint[2]), min(region[3], constraint[3])]
+                        located_containers += 1
+                        if reference_position is None:
+                            reference_position = container.absolute_position
+                except Exception:
+                    # A failed container still prevents output, but not reference observations.
+                    pass
                 reason = ("grounding_reference_unavailable" if located_containers == container_count
                           else "grounding_container_unavailable")
-                for spec in plan.references if located_containers == container_count else ():
-                    query, position = positioned_reference(spec, reference_position)
-                    calls += 1
-                    reference = self.native.predict(original, query, return_phrase_scores=True)
-                    boxes = _candidates(reference, (height, width))
-                    index = _match(reference, boxes, _absolute_region(position, width, height), adjusted=True)
-                    if index is None:
-                        break
-                    anchor = boxes[index].tolist()
-                    anchors.append(anchor)
-                    located += 1
-                    if not self.enclose_references:
-                        for relation in getattr(spec, "relations", ()) or (spec.relation,):
-                            constraint = _relation_region(anchor, relation, width, height)
-                            region = [max(region[0], constraint[0]), max(region[1], constraint[1]),
-                                      min(region[2], constraint[2]), min(region[3], constraint[3])]
+                for ordinal, spec in enumerate(plan.references, 1):
+                    attempt = dict(reference_index=ordinal, description=spec.description, query=None,
+                                   candidate_count=None, max_confidence=None, selected_index=None,
+                                   selected_bbox_original_xyxy=None, status="error", failure_stage=None)
+                    reference_results.append(attempt)
+                    stage = "query"
+                    try:
+                        query, position = positioned_reference(spec, reference_position)
+                        attempt["query"] = query
+                        calls += 1
+                        stage = "detection"
+                        reference = self.native.predict(original, query, return_phrase_scores=True)
+                        stage = "candidates"
+                        native_diagnostics = getattr(reference, "diagnostics", None)
+                        maximum = native_diagnostics.get("max_confidence") if isinstance(native_diagnostics, dict) else None
+                        if type(maximum) in {int, float} and 0 <= maximum <= 1:
+                            attempt["max_confidence"] = float(maximum)
+                        attempt["candidate_count"] = len(reference.boxes)
+                        boxes = _candidates(reference, (height, width))
+                        if not len(boxes):
+                            attempt["status"] = "no_candidates"
+                            continue
+                        stage = "matching"
+                        index = _match(reference, boxes, _absolute_region(position, width, height), adjusted=True)
+                        if index is None:
+                            attempt["status"] = "match_failed"
+                            continue
+                        anchor = boxes[index].tolist()
+                        if not self.enclose_references:
+                            for relation in getattr(spec, "relations", ()) or (spec.relation,):
+                                constraint = _relation_region(anchor, relation, width, height)
+                                region = [max(region[0], constraint[0]), max(region[1], constraint[1]),
+                                          min(region[2], constraint[2]), min(region[3], constraint[3])]
+                        anchors.append(anchor)
+                        located += 1
+                        attempt.update(status="selected", selected_index=index,
+                                       selected_bbox_original_xyxy=anchor)
+                    except Exception:
+                        # Keep only the phase, never exception text, and attempt the next reference.
+                        attempt["failure_stage"] = stage
                 if located == reference_count and located_containers == container_count:
                     if self.enclose_references:
                         bbox = (min(box[0] for box in anchors), min(box[1] for box in anchors),
