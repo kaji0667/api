@@ -24,6 +24,25 @@ _ANSWER_INSTRUCTION = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Grounding-only format directives. A sentence/line boundary and an explicit
+# box/coordinate noun are required: visual descriptions such as "a box-shaped
+# building" or a relative clause containing "return" are not instructions.
+_BBOX_ANSWER_INSTRUCTION = re.compile(
+    r"(?:^|(?<=[.!?。！？])\s+|\n\s*)"
+    r"(?:(?:please\s+)?(?:return|output|provide|give|report)\s+"
+    r"(?:(?:only|just)\s+)?(?:(?:a|an|the|its)\s+)?"
+    r"(?:(?:pixel|axis[- ]aligned)\s+)?"
+    r"(?:bbox\b|bounding\s+box\b|box\s+coordinates\b|coordinates\b)|"
+    r"(?:your\s+)?(?:response|output)\s+(?:must|should)\s+be\s+"
+    r"(?:(?:a|the)\s+)?(?:bbox\b|bounding\s+box\b|coordinates\b)|"
+    r"(?:请)?(?:只(?:需|能)?(?:回答|输出|返回)|返回|输出|给出)\s*"
+    r"(?:该目标的?|目标的?|物体的?)?(?:边界框|边框|坐标|bbox\b))"
+    r".*$", re.IGNORECASE | re.DOTALL,
+)
+_DESCRIPTION_MARKER = re.compile(
+    r"\bdescription\s*[:：]|(?:目标描述|物体描述|描述)\s*[:：]", re.IGNORECASE,
+)
+
 
 def _source(question: str) -> str:
     if not isinstance(question, str) or not question.strip():
@@ -38,11 +57,14 @@ def _without_answer_instruction(text: str) -> str:
 def grounding_text(question: str) -> str:
     """Keep the entire explicit Description payload, including relationships."""
     text = _source(question)
-    markers = list(re.finditer(r"\bdescription\s*:", text, re.IGNORECASE))
+    markers = list(_DESCRIPTION_MARKER.finditer(text))
     if len(markers) > 1:
         raise TaskInputError("ambiguous_description", "Multiple description payloads")
     if markers:
         text = text[markers[0].end():]
+    # Strip bbox formatting before the shared, narrower answer wrapper. This
+    # preserves every target/reference sentence and interior newline verbatim.
+    text = _BBOX_ANSWER_INSTRUCTION.sub("", text).strip()
     text = _without_answer_instruction(text)
     if not text:
         raise TaskInputError("empty_task_text", "Missing object description")

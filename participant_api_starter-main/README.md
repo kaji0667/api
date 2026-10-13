@@ -522,3 +522,11 @@ presence调用检测、counting调用计数、grounding调用配置指定的dete
 本策略完整API回归78/78、4.671秒，真实Ollama合成任务选择10/10；四条私有原题（两bbox、一presence、一counting）真实Qwen解析task符合预期，QuestionPlan仅task/original_question且原字符串逐字相等。更新API一次启动113.48秒后本机鉴权health200/ready；同四题真实重放均200、严格response_valid通过，无503或路由错误，两bbox均有合法原图框。它们证明任务选择、原文传递及有效返回；没有金标/IoU，不能称准确率提升或官网提分。上文62/73项与空框结果为前阶段历史证据。
 
 旧ngrok曾退出，已在Windows9001health200后复用实际已安装、签名有效的工具和原账号配置恢复隧道，未下载、复制或建立目录。原HTTPS origin与模型Key保持，上游为9001，公网鉴权health最终200/ready/2.0/rsu-dev100-v2。继续复用当前隧道，不使用此前失效的AppData命令；重启仍须核对实际安装路径。这里没有官网提交或得分结果，服务及公网就绪不等于完成评测。
+
+## 2026-10-13 定位描述与输出格式指令分离
+
+`api_task_text.grounding_text` 现在识别句/行边界上的 `Return a bbox`、`Return the bounding box`、`Please provide the bounding box`、`Report box coordinates` 及中文坐标输出指令，防止它们进入目标/参照描述。支持 `Description：`、`目标描述：` 和 `描述:` 标记。属性、否定、参照句与内部换行保留；未知指令不擅自删除，多个payload拒绝。中文描述不翻译，原token上限不变。
+
+原完整描述检测及clip_guarded保持。两种混合编码和裁块去方位的195公开实验均未通过，未接API。12次公开图像/合成包装的真实链路，新包装与裸描述的候选/分数/索引精确一致12/12；相同格式干预旧正确7/12→新8/12，无丢失，不是官网收益或建筑/草坪能力证明。API253/253、定位110/110通过，详情见 `tasks/detection/TEXT_PROCESSING_TRIAL.md`。
+
+现有进程需在原终端Ctrl+C后重新执行 `bash scripts/serve_hfsa_api.sh` 才会读取此修复；不需要新增配置或更换Key。本轮没有启停服务或创建官网评测。
