@@ -5,7 +5,7 @@ constrain the search; they never become target boxes. No crop-image CLIP scores.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import re
 import time
 from typing import Any, Callable
@@ -20,13 +20,7 @@ from .reference_grounding import (_absolute_region, _relation_region, _expanded_
                                  _box_iou)
 # Reuse only source-bound grammar, never the experimental mixed encoder.
 from .text_conditioning import parse_grounding_text
-
-
-@dataclass(frozen=True)
-class SpatialReferencePlan:
-    target_query: str
-    references: tuple[ReferenceSpec, ...]
-    absolute_position: tuple[int | None, int | None] | None
+from .structured_spatial_parser import SpatialReferencePlan, SpatialParseError
 
 
 _ZH_ATTRIBUTE = re.compile(
@@ -101,11 +95,17 @@ def parse_spatial_reference_plan(description: str) -> SpatialReferencePlan | Non
 
 def positioned_reference(spec: ReferenceSpec, position: tuple | None) -> tuple[str, tuple | None]:
     """Carry target coarse location; preserve an explicit reference's own location."""
-    valid, explicit = _absolute_position(spec.description)
+    explicit = getattr(spec, "absolute_position", None)
+    # Structured plans have already resolved image/container scope. Re-running
+    # the legacy scanner could attach a container's position to the image.
+    valid, legacy_position = ((True, None) if hasattr(spec, "absolute_position")
+                              else _absolute_position(spec.description))
     if not valid:
         raise ValueError("Conflicting reference location")
-    if explicit is not None or position is None:
-        return spec.description, explicit
+    explicit = explicit if explicit is not None else legacy_position
+    position = explicit if explicit is not None else position
+    if legacy_position is not None or position is None:
+        return spec.description, position
     labels = {
         (-1, -1): ("top-left corner", "左上角"), (1, -1): ("top-right corner", "右上角"),
         (-1, 1): ("bottom-left corner", "左下角"), (1, 1): ("bottom-right corner", "右下角"),
@@ -158,40 +158,72 @@ def _match(result: Any, boxes: np.ndarray, region: list[float], *,
 
 class SpatialReferenceGroundingExecutor:
     def __init__(self, native: Any, *, description_extractor: Callable,
-                 image_converter: Callable) -> None:
+                 image_converter: Callable, plan_parser: Callable | None = None) -> None:
         if (not callable(getattr(native, "predict", None)) or not callable(description_extractor)
                 or not callable(image_converter)):
             raise ValueError("spatial_reference requires native detection and input preparation")
         self.native, self.description_extractor, self.image_converter = native, description_extractor, image_converter
+        self.plan_parser = plan_parser if plan_parser is not None else parse_spatial_reference_plan
+        if not callable(self.plan_parser):
+            raise ValueError("spatial_reference requires a callable text parser")
+        self.parser_name = "qwen" if getattr(self.plan_parser, "name", None) == "qwen" else "rules"
 
     def predict(self, image: Any, original_question: str) -> Any:
         started = time.monotonic()
         description = self.description_extractor(original_question)
-        plan = parse_spatial_reference_plan(description)
+        reason = "grounding_unsupported_plan"
+        try:
+            plan = self.plan_parser(description)
+        except SpatialParseError as error:
+            plan, reason = None, error.code
         reference_count, located, roi_count, calls = len(plan.references) if plan else 0, 0, 0, 0
+        container_count, located_containers = len(plan.containers) if plan else 0, 0
 
         def finished(result: Any, reason: str, selected: bool = False) -> Any:
             diagnostics = dict(result.diagnostics or {})
             diagnostics.update(
                 grounding_policy="spatial_reference", grounding_parse_status="parsed" if plan else "unsupported",
+                grounding_parser=self.parser_name,
                 grounding_outcome="region_selected" if selected else "native_fallback", grounding_reason=reason,
                 grounding_reference_count=reference_count, grounding_located_reference_count=located,
                 grounding_candidate_count=len(result.boxes), grounding_roi_count=roi_count,
                 grounding_detector_call_count=calls,
+                grounding_container_count=container_count, grounding_located_container_count=located_containers,
                 grounding_elapsed_ms=round((time.monotonic() - started) * 1000),
             )
             return replace(result, diagnostics=diagnostics)
 
-        reason = "grounding_unsupported_plan"
-        if plan is not None:
-            original = self.image_converter(image)
-            height, width = original.shape[:2]
-            region = _absolute_region(plan.absolute_position, width, height)
-            anchors = []
-            reason = "grounding_reference_unavailable"
+        if plan is not None and not (plan.references or plan.containers or plan.absolute_position or plan.frame_edges):
+            reason = "grounding_no_spatial_constraints"
+        elif plan is not None:
             try:
-                for spec in plan.references:
-                    query, position = positioned_reference(spec, plan.absolute_position)
+                original = self.image_converter(image)
+                height, width = original.shape[:2]
+                region = _absolute_region(plan.absolute_position, width, height)
+                anchors = []
+                reference_position = plan.absolute_position
+                reason = "grounding_container_unavailable"
+                for container in plan.containers:
+                    query, position = positioned_reference(ReferenceSpec(container.description, "near"),
+                                                           container.absolute_position)
+                    calls += 1
+                    result = self.native.predict(original, query, return_phrase_scores=True)
+                    boxes = _candidates(result, (height, width))
+                    index = _match(result, boxes, _absolute_region(position, width, height), adjusted=True)
+                    if index is None:
+                        break
+                    x1, y1, x2, y2 = boxes[index].tolist()
+                    local = _absolute_region(container.target_position, x2 - x1, y2 - y1)
+                    constraint = [local[0] + x1, local[1] + y1, local[2] + x1, local[3] + y1]
+                    region = [max(region[0], constraint[0]), max(region[1], constraint[1]),
+                              min(region[2], constraint[2]), min(region[3], constraint[3])]
+                    located_containers += 1
+                    if reference_position is None:
+                        reference_position = container.absolute_position
+                reason = ("grounding_reference_unavailable" if located_containers == container_count
+                          else "grounding_container_unavailable")
+                for spec in plan.references if located_containers == container_count else ():
+                    query, position = positioned_reference(spec, reference_position)
                     calls += 1
                     reference = self.native.predict(original, query, return_phrase_scores=True)
                     boxes = _candidates(reference, (height, width))
@@ -201,10 +233,11 @@ class SpatialReferenceGroundingExecutor:
                     anchor = boxes[index].tolist()
                     anchors.append(anchor)
                     located += 1
-                    constraint = _relation_region(anchor, spec.relation, width, height)
-                    region = [max(region[0], constraint[0]), max(region[1], constraint[1]),
-                              min(region[2], constraint[2]), min(region[3], constraint[3])]
-                if located == reference_count:
+                    for relation in getattr(spec, "relations", ()) or (spec.relation,):
+                        constraint = _relation_region(anchor, relation, width, height)
+                        region = [max(region[0], constraint[0]), max(region[1], constraint[1]),
+                                  min(region[2], constraint[2]), min(region[3], constraint[3])]
+                if located == reference_count and located_containers == container_count:
                     reason = "grounding_conflicting_region"
                     if region[2] > region[0] and region[3] > region[1]:
                         roi = _expanded_roi(region, width, height)

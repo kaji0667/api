@@ -101,6 +101,11 @@ _DIAGNOSTIC_REASONS = frozenset({
     "grounding_invalid_selection",
     "grounding_region_selected", "grounding_reference_unavailable",
     "grounding_conflicting_region", "grounding_roi_unavailable",
+    "grounding_container_unavailable", "grounding_no_spatial_constraints",
+    "grounding_parser_invalid_output", "grounding_parser_source_mismatch",
+    "grounding_parser_unresolved", "grounding_parser_conflicting_position",
+    "grounding_parser_unaccounted_text", "grounding_parser_input_too_long",
+    "grounding_parser_unavailable",
 })
 _DIAGNOSTIC_ERROR_TYPES = frozenset({
     "AdapterFailure", "ValueError", "TypeError", "KeyError", "RuntimeError", "OSError",
@@ -227,6 +232,7 @@ def _prediction_diagnostic(request: dict[str, Any], image_count: int,
             for key, allowed in (
                 ("grounding_policy", {"native", "spatial_reference"}),
                 ("grounding_parse_status", {"parsed", "unsupported"}),
+                ("grounding_parser", {"qwen", "rules"}),
                 ("grounding_outcome", {"region_selected", "native_fallback"}),
                 ("grounding_reason", _DIAGNOSTIC_REASONS),
             ):
@@ -235,7 +241,8 @@ def _prediction_diagnostic(request: dict[str, Any], image_count: int,
                     safe[key] = value
             for key in ("grounding_reference_count", "grounding_candidate_count",
                         "grounding_located_reference_count", "grounding_roi_count",
-                        "grounding_detector_call_count", "grounding_elapsed_ms"):
+                        "grounding_detector_call_count", "grounding_elapsed_ms",
+                        "grounding_container_count", "grounding_located_container_count"):
                 value = diagnostic.get(key)
                 if type(value) is int and value >= 0:
                     safe[key] = value
@@ -402,9 +409,11 @@ class HFSAAdapter:
         grounding_executor = None
         if grounding_policy == "spatial_reference":
             from tasks.detection.spatial_reference_grounding import SpatialReferenceGroundingExecutor
+            from tasks.detection.structured_spatial_parser import QwenSpatialPlanParser
 
             grounding_executor = SpatialReferenceGroundingExecutor(
                 detection, description_extractor=detection_text, image_converter=detection._image,
+                plan_parser=QwenSpatialPlanParser(),
             )
         print("HFSA API: loading counting", flush=True)
         counting = NativeCounting(

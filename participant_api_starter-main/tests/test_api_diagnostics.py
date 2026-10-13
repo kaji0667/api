@@ -159,6 +159,25 @@ class PersistentDiagnosticTests(unittest.TestCase):
             thread.join()
         self.assertEqual(sorted(row["synthetic"] for row in self.rows()), list(range(8)))
 
+    def test_spatial_parser_diagnostics_keep_fixed_reason_and_counts_only(self):
+        import numpy as np
+        self.detection.predict.return_value = SimpleNamespace(
+            detection_count=1, original_size=(40, 80), boxes=np.array([[1, 2, 20, 30]]),
+            scores=np.array([.5]), grounding_index=0,
+            diagnostics=dict(grounding_policy="spatial_reference", grounding_parser="qwen",
+                             grounding_parse_status="unsupported", grounding_outcome="native_fallback",
+                             grounding_reason="grounding_parser_source_mismatch",
+                             grounding_reference_count=4, grounding_container_count=1,
+                             grounding_located_container_count=0, source="private-source-span",
+                             parsed_plan="private-parser-output"),
+        )
+        self.predict("visual_grounding", "bbox", image_width=80, image_height=40)
+        safe = self.rows()[0]["detection_inference"]
+        self.assertEqual(safe["grounding_parser"], "qwen")
+        self.assertEqual(safe["grounding_reason"], "grounding_parser_source_mismatch")
+        self.assertEqual(safe["grounding_container_count"], 1)
+        self.assertNotIn("private", self.log.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

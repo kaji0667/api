@@ -982,7 +982,11 @@ class LoadingBoundaryTests(unittest.TestCase):
         factories["grounding"].assert_called_once_with(
             detection,
             description_extractor=detection_text, image_converter=detection._image,
+            plan_parser=factories["grounding"].call_args.kwargs["plan_parser"],
         )
+        parser = factories["grounding"].call_args.kwargs["plan_parser"]
+        self.assertEqual(parser.name, "qwen")
+        self.assertTrue(callable(parser))
         self.assertEqual(factories["detection"].call_args.kwargs["candidate_confidence"], .25)
         self.assertEqual(adapter.grounding_policy, "spatial_reference")
         self.assertIs(adapter.grounding_executor, factories["grounding"].return_value)
