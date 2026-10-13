@@ -5,6 +5,8 @@ This module has no images, detector, training data, credentials or answer boxes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import Counter
+from functools import lru_cache
 import json
 import os
 import re
@@ -208,6 +210,143 @@ def _source(index: Any, sentences: list[str]) -> str:
     return sentences[index]
 
 
+@dataclass(frozen=True)
+class _RelationClause:
+    source_id: int
+    text: str
+    payload: str = ""
+    direction: str = ""
+    edge: str = ""
+
+
+_CLAUSE_START = r"(?:^|[,;]\s*(?:(?:and|while|whereas)\s+)?|\s+(?:and|while|whereas)\s+)"
+_NEIGHBOR = re.compile(
+    _CLAUSE_START + r"\s*(?:(?:to|on)\s+(?:its|the)\s+)?"
+    r"(?P<direction>(?:(?:upper|lower|top|bottom)[ -]+)?(?:left|right)|above|below)"
+    r"\s*(?:(?:it|the target|this target)\s*)?,?\s*"
+    r"(?:there\s+)?(?:is|are|lies)\s+", re.I)
+_FRAME = re.compile(
+    _CLAUSE_START + r"\s*(?:"
+    r"(?P<subject>it|the target|this target)\s+(?:is\s+)?"
+    r"(?:adjacent\s+to|bordered\s+by|bounded\s+by|touches|borders)\s+(?:the\s+)?"
+    r"(?P<object_side>left|right|top|bottom)\s+(?:edge|border|boundary)"
+    r"|(?:the\s+)?(?P<subject_side>left|right|top|bottom)(?:\s+side)?\s+"
+    r"is\s+(?:bordered|bounded)\s+by\s+(?:the\s+)?(?:edge|border|boundary))"
+    r"\s+of\s+(?:the\s+)?(?:image|picture|frame)\b", re.I)
+
+
+def _relation_clauses(text: str) -> list[_RelationClause]:
+    """Recognize explicit target-neighbor predicates, keeping sentence IDs.
+
+    A comma or conjunction is a boundary only when followed by a complete
+    direction predicate. Attached details stay inside the original noun phrase.
+    """
+    clauses = []
+    for source_id, sentence in enumerate(source_sentences(text)):
+        markers = sorted([(m.start(), m, False) for m in _NEIGHBOR.finditer(sentence)]
+                         + [(m.start(), m, True) for m in _FRAME.finditer(sentence)
+                            if not (m['subject'] and m['subject'].lower() == 'it' and m.start() > 0)])
+        for index, (start, match, edge) in enumerate(markers):
+            end = markers[index + 1][0] if index + 1 < len(markers) else len(sentence)
+            if edge:
+                if sentence[match.end():end].strip(' \t\r\n.,;!?'):
+                    raise SpatialParseError('grounding_parser_unresolved')
+                clauses.append(_RelationClause(source_id, sentence[start:match.end()],
+                    edge=(match['object_side'] or match['subject_side']).lower()))
+            else:
+                payload = sentence[match.end():end].strip().rstrip('.,;!?').strip()
+                direction = re.sub(r'[ -]+', '_', match['direction'].lower())
+                direction = direction.replace('top_', 'upper_').replace('bottom_', 'lower_')
+                clauses.append(_RelationClause(source_id, sentence[start:end], payload, direction))
+    return clauses
+
+
+@lru_cache(maxsize=1)
+def _english_dependencies():
+    # Reuse the project's installed English parser; never download a model.
+    try:
+        import spacy
+        return spacy.load('en_core_web_sm', disable=['ner'])
+    except (ImportError, OSError):
+        raise SpatialParseError('grounding_parser_unavailable') from None
+
+
+def _neighbor_parts(payload: str) -> list[str]:
+    if not payload or _NEGATIVE.search(payload) or re.search(r'\b(?:while|whereas)\b', payload, re.I):
+        raise SpatialParseError('grounding_parser_unresolved')
+    if not re.search(r'\band\b', payload, re.I):
+        return [payload]
+    doc = _english_dependencies()(payload)
+    root = next((token for token in doc if token.dep_ == 'ROOT'), None)
+    if root is None or root.pos_ not in {'NOUN', 'PROPN'}:
+        raise SpatialParseError('grounding_parser_unresolved')
+    heads = [root, *[token for token in root.conjuncts if token.pos_ in {'NOUN', 'PROPN'}]]
+    if len(heads) == 1:
+        return [payload]
+    # Only root-level coordinated entities are separate neighbors. Colors,
+    # roof attributes, and trees attached through with/lined with stay attached.
+    cuts = []
+    for head in sorted(heads[1:], key=lambda token: token.i):
+        subtree = [token for token in head.subtree if token.dep_ != 'cc']
+        start = min(token.idx for token in subtree)
+        glue = re.search(r'\s*(?:,\s*)?(?:and\s+)?$', payload[:start], re.I)
+        cuts.append((glue.start(), start))
+    parts, start = [], 0
+    for stop, next_start in cuts:
+        parts.append(payload[start:stop].strip())
+        start = next_start
+    parts.append(payload[start:].strip())
+    if any(not part for part in parts):
+        raise SpatialParseError('grounding_parser_unresolved')
+    return parts
+
+
+def _complete_literal_relations(value: Any, text: str) -> Any:
+    """Repair only source-exact explicit clauses before strict validation."""
+    if not isinstance(value, dict) or not isinstance(value.get('references'), list) or not isinstance(value.get('frame_edges'), list):
+        return value
+    sentences = source_sentences(text)
+    for ref in value['references']:
+        _fields(ref, {'description', 'source_id', 'direction', 'global_position'})
+        _quote(ref['description'], _source(ref['source_id'], sentences))
+        if not isinstance(ref['direction'], str) or ref['direction'] not in INVERSE:
+            raise SpatialParseError('grounding_parser_invalid_output')
+        _reference_position(ref['global_position'], sentences[ref['source_id']], text, [])
+    clauses = _relation_clauses(text)
+    result = dict(value)
+    refs = [dict(ref, description=_quote(ref['description'], sentences[ref['source_id']]))
+            for ref in value['references']]
+    edges = list(value['frame_edges'])
+    for clause in clauses:
+        if _NEGATIVE.search(clause.text):
+            raise SpatialParseError('grounding_parser_unresolved')
+        if clause.edge:
+            if not any(isinstance(e, dict) and e.get('source_id') == clause.source_id
+                       and e.get('side') == clause.edge for e in edges):
+                edges.append(dict(side=clause.edge, source_id=clause.source_id))
+            continue
+        members = [ref for ref in refs if isinstance(ref, dict)
+                   and ref.get('source_id') == clause.source_id
+                   and isinstance(ref.get('description'), str)
+                   and ref['description'].strip().casefold() in clause.payload.casefold()
+                   and _source_direction(ref.get('direction', ''), source_sentences(text)[clause.source_id],
+                                         ref['description']) == clause.direction]
+        for ref in members:
+            refs.remove(ref)
+        for part in _neighbor_parts(clause.payload):
+            locations = [ref['global_position'] for ref in members
+                         if ref['description'].casefold() in part.casefold()
+                         and ref['global_position']['position'] != 'none']
+            if len({location['position'] for location in locations}) > 1:
+                raise SpatialParseError('grounding_parser_conflicting_position')
+            location = locations[0] if locations else _position_record()
+            _reference_position(location, part, text, [])
+            refs.append(dict(description=part, source_id=clause.source_id,
+                             direction=clause.direction, global_position=location))
+    result['references'], result['frame_edges'] = refs, edges
+    return result
+
+
 def _position(value: Any, text: str, quotes: list[str]) -> tuple | None:
     _fields(value, {"position", "source"})
     name = value["position"]
@@ -231,6 +370,19 @@ def _position(value: Any, text: str, quotes: list[str]) -> tuple | None:
             raise SpatialParseError("grounding_parser_source_mismatch")
         quotes.append(source)
     return POSITIONS[name]
+
+
+def _reference_position(value: Any, source: str, text: str, quotes: list[str]) -> tuple | None:
+    position = _position(value, text, quotes)
+    if position is not None:
+        fragment = _quote(value['source'], source)
+        start = source.casefold().find(fragment.casefold())
+        before, after = source[:start], source[start + len(fragment):]
+        if not (re.search(r'\b(?:image|picture|frame)\b|图像|图片|画面|影像', fragment, re.I)
+                or re.match(r'\s+(?:of|in)\s+(?:the\s+)?(?:image|picture|frame)\b', after, re.I)
+                or re.search(r'\b(?:image|picture|frame)[\s\u2019\x27]*s?\s*$', before, re.I)):
+            raise SpatialParseError('grounding_parser_source_mismatch')
+    return position
 
 
 def _check_content_coverage(text: str, queries: list[str]) -> None:
@@ -264,6 +416,16 @@ def _check_content_coverage(text: str, queries: list[str]) -> None:
 
 def _source_direction(direction: str, source: str, description: str) -> str:
     """Literal unambiguous grammar takes priority over the model's role label."""
+    literal = [clause.direction for clause in _relation_clauses(source)
+               if clause.payload and description.strip().casefold() in clause.payload.casefold()]
+    if literal:
+        if len(set(literal)) == 1:
+            return literal[0]
+        # Identical entities can occur on different sides in one sentence.
+        # Their counts are checked below; do not attach all to the first span.
+        if direction in literal:
+            return direction
+        raise SpatialParseError('grounding_parser_unresolved')
     before = source[:source.lower().find(description.lower())]
     direct = re.match(r"\s*(?:it|the target|this target)\s+is\s+(?:located\s+)?"
                       r"(left of|right of|above|below)\s+", source, re.I)
@@ -283,6 +445,29 @@ def _source_direction(direction: str, source: str, description: str) -> str:
             vertical = "upper" if cue["vertical"].lower() in {"upper", "top"} else "lower"
             expected = vertical + "_" + expected
     return expected
+
+
+def _check_clause_coverage(text: str, records: list[tuple], edges: list[dict]) -> list[str]:
+    expected, actual = Counter(), Counter()
+    clauses = _relation_clauses(text)
+    edge_quotes = []
+    for clause in clauses:
+        if _NEGATIVE.search(clause.text):
+            raise SpatialParseError('grounding_parser_unresolved')
+        if clause.edge:
+            if not any(edge['source_id'] == clause.source_id and edge['side'] == clause.edge for edge in edges):
+                raise SpatialParseError('grounding_parser_unaccounted_text')
+            edge_quotes.append(clause.text)
+        else:
+            expected.update((clause.source_id, clause.direction, part.casefold())
+                            for part in _neighbor_parts(clause.payload))
+    for source_id, direction, description in records:
+        if any(clause.source_id == source_id and clause.payload
+               and description.casefold() in clause.payload.casefold() for clause in clauses):
+            actual[(source_id, direction, description.casefold())] += 1
+    if expected != actual:
+        raise SpatialParseError('grounding_parser_unaccounted_text')
+    return edge_quotes
 
 
 def validate_spatial_plan(value: Any, text: str) -> SpatialReferencePlan:
@@ -317,6 +502,7 @@ def validate_spatial_plan(value: Any, text: str) -> SpatialReferencePlan:
             if not target[0]:
                 raise SpatialParseError("grounding_parser_invalid_output")
     references = []
+    reference_records = []
     for ref in value["references"]:
         _fields(ref, {"description", "source_id", "direction", "global_position"})
         source = _source(ref["source_id"], sentences)
@@ -329,11 +515,10 @@ def validate_spatial_plan(value: Any, text: str) -> SpatialReferencePlan:
         if not isinstance(direction, str) or direction not in INVERSE:
             raise SpatialParseError("grounding_parser_invalid_output")
         direction = _source_direction(direction, source, description)
-        ref_position = _position(ref["global_position"], text, quotes)
-        if ref_position is not None:
-            _quote(ref["global_position"]["source"], source)
+        ref_position = _reference_position(ref["global_position"], description, text, quotes)
         relations = INVERSE[direction]
         references.append(PositionedReferenceSpec(description, relations[0], ref_position, relations))
+        reference_records.append((ref['source_id'], direction, description))
         quotes.append(source)
     containers = []
     for container in value["containers"]:
@@ -366,7 +551,9 @@ def validate_spatial_plan(value: Any, text: str) -> SpatialReferencePlan:
             raise SpatialParseError("grounding_parser_source_mismatch")
         if _NEGATIVE.search(source):
             raise SpatialParseError("grounding_parser_unresolved")
-        if re.match(r"\s*(?:above|below|to\s+(?:its|the)\s+(?:left|right))\b", source, re.I):
+        # An edge belongs to the exact target-edge clause, not any object in
+        # the same sentence. A later while-clause may have a different subject.
+        if not any(clause.edge == side for clause in _relation_clauses(source)):
             raise SpatialParseError("grounding_parser_unresolved")
         axis = 0 if side in {"left", "right"} else 1
         direction = -1 if side in {"left", "top"} else 1
@@ -379,8 +566,17 @@ def validate_spatial_plan(value: Any, text: str) -> SpatialReferencePlan:
             and re.search(r"\b(?:image|picture|frame)\b|图像|图片|画面", target_source, re.I)
             and re.search(r"\b(?:left|right|top|bottom|upper|lower|center|centre)\b|左|右|上|下|中央|中心", target_source, re.I)):
         raise SpatialParseError("grounding_parser_unaccounted_text")
-    _check_content_coverage(text, [*target, *[r.description for r in references],
-                                  *[c.description for c in containers]])
+    edge_quotes = _check_clause_coverage(text, reference_records, value['frame_edges'])
+    coverage = [*target, *[r.description for r in references],
+                *[c.description for c in containers], *edge_quotes]
+    _check_content_coverage(text, coverage)
+    for source_id, sentence in enumerate(sentences):
+        # Later attribute sentences can name just the target/container head.
+        # Neighbor descriptions, in contrast, remain bound to their source ID.
+        local = [*target, *[c.description for c in containers]]
+        local.extend(description for index, _, description in reference_records if index == source_id)
+        local.extend(edge for edge in edge_quotes if edge.casefold() in sentence.casefold())
+        _check_content_coverage(sentence, local)
     return SpatialReferencePlan(", ".join(dict.fromkeys(target)), tuple(references),
                                 tuple(axes) if any(a is not None for a in axes) else None,
                                 tuple(containers), tuple(dict.fromkeys(edges)))
@@ -432,7 +628,8 @@ class QwenSpatialPlanParser:
             outer = json.loads(raw)
             if not isinstance(outer, dict) or outer.get("done") is not True:
                 raise SpatialParseError("grounding_parser_invalid_output")
-            return validate_spatial_plan(json.loads(outer["message"]["content"]), description)
+            value = _complete_literal_relations(json.loads(outer["message"]["content"]), description)
+            return validate_spatial_plan(value, description)
         except SpatialParseError:
             raise
         except (urllib.error.URLError, TimeoutError, OSError):
