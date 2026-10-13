@@ -27,7 +27,7 @@ openclip/ViT-L-14.pt
 
 各任务统一使用 `tasks/<task>/` 放实现，`scripts/train_<task>.sh` / `scripts/test_<task>.sh` 放训练与评估入口，`runs/<task>/` 放权重和实验记录。VQA 使用 `scripts/prepare_vqa.sh`、`scripts/train_vqa.sh`、`scripts/test_vqa.sh`，不再保留根目录 `run_vqa.py`。原 `scripts/eval_vqa.sh` 命令改用 `scripts/test_vqa.sh`，参数不变。
 
-新增文本回答交付包已整理到 `runs/vqa/text/`。该包缺少与其 MLP 答案头匹配的源码，当前仅完成资产整理与完整性检查，尚未接入 API；当前十二头包继续位于 `runs/vqa/qformer/`。详细交付状态见 [文本回答整理记录](tasks/vqa/TEAM_TEXT_MERGE.md)。
+当前 VQA 为队友合并的 v4：十二类残差 MLP 答案头和题型分类器 LayerNorm，模型包统一位于 `runs/vqa/qformer/`。VQA 短文本、单选和枚举共用这套实现；旧五头文本包与十二头线性包移出交付工程保留对照，不作为兼容或自动回退。完整交付与验收说明见 [v4 合并记录](tasks/vqa/TEAM_V4_MERGE.md)。
 
 ## 3. 一键启动
 
@@ -51,7 +51,7 @@ Web 单图推理不需要完整数据集。VRSBench、DIOR-RSVG 和 RRSIS-D 原�
 
 ## 5. 独立视觉问答第一阶段
 
-当前接入队友十二类 Q-Former v2，使用 `runs/vqa/qformer/`，模型、归一与词表一起验收，不回退旧五头包。交付公开val复算53.797604%，本机验收和限制见 [合并记录](tasks/vqa/TEAM_V3_MERGE.md)。以下为旧五头历史记录，不代表当前支持范围。
+当前接入队友十二类残差头 Q-Former v4，使用 `runs/vqa/qformer/`，模型、归一与词表一起验收，不回退旧五头或线性头包。v3 公开 val 为53.797604%，v4 交付记录为54.163992%；本机静态验收和限制见 [v4 合并记录](tasks/vqa/TEAM_V4_MERGE.md)。以下为旧五头历史记录，不代表当前支持范围。
 
 问答代码位于 `tasks/vqa/`，主模型权重、配置、真实验证结果及公开样例位于 `runs/vqa/stage1/`；独立仅问题/仅图像基线分别位于 `runs/vqa/question_only/`、`runs/vqa/image_only/`。支持类别、颜色、形状、存在和场景五类答案；旧版已接入官方API的vqa分支，Web保持原状。
 
