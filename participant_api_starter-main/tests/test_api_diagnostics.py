@@ -159,6 +159,78 @@ class PersistentDiagnosticTests(unittest.TestCase):
             thread.join()
         self.assertEqual(sorted(row["synthetic"] for row in self.rows()), list(range(8)))
 
+    def test_evaluation_enclosure_diagnostics_keep_fixed_values_without_bbox_or_source(self):
+        from tasks.detection.spatial_reference_grounding import ReferenceEnclosureResult
+
+        executor = Mock()
+        executor.predict.return_value = ReferenceEnclosureResult((1, 2, 20, 30), (40, 80),
+            diagnostics=dict(grounding_policy="reference_enclosure", grounding_parser="qwen",
+                             grounding_parse_status="parsed", grounding_outcome="enclosure_selected",
+                             grounding_reason="grounding_reference_enclosed", grounding_reference_count=4,
+                             grounding_located_reference_count=4, grounding_roi_count=0,
+                             grounding_detector_call_count=4, bbox=[1, 2, 20, 30],
+                             source="private-source", confidence=.99))
+        self.adapter = HFSAAdapter(None, self.detection, None, None,
+                                   grounding_policy="reference_enclosure", grounding_executor=executor)
+        self.predict("visual_grounding", "bbox", image_width=80, image_height=40)
+        safe = self.rows()[0]["detection_inference"]
+        self.assertEqual(safe["grounding_policy"], "reference_enclosure")
+        self.assertEqual(safe["grounding_outcome"], "enclosure_selected")
+        self.assertEqual(safe["grounding_reason"], "grounding_reference_enclosed")
+        self.assertEqual(safe["grounding_roi_count"], 0)
+        self.assertNotIn("bbox", safe)
+        self.assertNotIn("confidence", safe)
+        self.assertNotIn("private", self.log.read_text(encoding="utf-8"))
+
+    def test_spatial_parser_diagnostics_keep_fixed_reason_and_counts_only(self):
+        import numpy as np
+        self.detection.predict.return_value = SimpleNamespace(
+            detection_count=1, original_size=(40, 80), boxes=np.array([[1, 2, 20, 30]]),
+            scores=np.array([.5]), grounding_index=0,
+            diagnostics=dict(grounding_policy="spatial_reference", grounding_parser="qwen",
+                             grounding_parse_status="unsupported", grounding_outcome="native_fallback",
+                             grounding_reason="grounding_parser_source_mismatch",
+                             grounding_reference_count=4, grounding_container_count=1,
+                             grounding_located_container_count=0, source="private-source-span",
+                             parsed_plan="private-parser-output"),
+        )
+        self.predict("visual_grounding", "bbox", image_width=80, image_height=40)
+        safe = self.rows()[0]["detection_inference"]
+        self.assertEqual(safe["grounding_parser"], "qwen")
+        self.assertEqual(safe["grounding_reason"], "grounding_parser_source_mismatch")
+        self.assertEqual(safe["grounding_container_count"], 1)
+        self.assertNotIn("private", self.log.read_text(encoding="utf-8"))
+
+    def test_reference_attempts_keep_numbers_and_fixed_statuses_without_descriptions_or_boxes(self):
+        from tasks.detection.spatial_reference_grounding import ReferenceEnclosureResult
+
+        executor = Mock()
+        executor.predict.return_value = ReferenceEnclosureResult((1, 2, 20, 30), (40, 80), diagnostics={
+            "grounding_reference_results": [
+                dict(reference_index=1, status="selected", candidate_count=2, max_confidence=.876543219,
+                     selected_index=1, query="private-query", description="private-description",
+                     selected_bbox_original_xyxy=[1, 2, 20, 30]),
+                dict(reference_index=2, status="no_candidates", candidate_count=0, max_confidence=.01,
+                     selected_index=None),
+                dict(reference_index=3, status="error", failure_stage="matching", error="private-error",
+                     candidate_count=True, selected_index=-1, max_confidence=float("nan")),
+                dict(reference_index=True, status="selected"),
+                dict(reference_index=4, status="private-status"),
+                "private-malformed-attempt",
+            ],
+        })
+        self.adapter = HFSAAdapter(None, self.detection, None, None,
+                                   grounding_policy="reference_enclosure", grounding_executor=executor)
+        self.predict("visual_grounding", "bbox", image_width=80, image_height=40)
+        attempts = self.rows()[0]["detection_inference"]["grounding_reference_results"]
+        self.assertEqual(attempts, [
+            dict(reference_index=1, status="selected", candidate_count=2, max_confidence=.87654322, selected_index=1),
+            dict(reference_index=2, status="no_candidates", candidate_count=0, max_confidence=.01),
+            dict(reference_index=3, status="error", failure_stage="matching"),
+        ])
+        self.assertNotIn("private", self.log.read_text(encoding="utf-8"))
+        self.assertNotIn("selected_bbox_original_xyxy", str(attempts))
+
 
 if __name__ == "__main__":
     unittest.main()

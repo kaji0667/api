@@ -1,5 +1,13 @@
 # 参赛队伍最小模型 API 示例（协议 2.0）
 
+## 2026-10-12 正式权重位于工程内部（当前默认路径）
+
+用户要求 `HFSA-main` 内权重齐全，分类/计数/检测/RefSeg 的正式权重及 YOLOv12m、OpenCLIP 基础权重已按原相对目录复制到工程内，6份文件逐项 SHA-256 与原文件相同。正式 VQA 模型包继续保留在 `runs/vqa/qformer/`，其配置、manifest 与验收文件不修改。
+
+API 和启动脚本默认 `HFSA_MODELS_DIR=HFSA-main` 本身，检测/计数直接加载工程内 `openclip/ViT-L-14.pt`；显式 RefSeg 复用该同版本文本编码器。仍可设置 `HFSA_MODELS_DIR` 使用其他权重根目录。VQA 训练配置和评估/核验脚本的基础权重默认路径同步为 `pretrain_model/yolov12m.pt` 与 `openclip/ViT-L-14.pt`。
+
+如果原 API 终端曾显式 export 外部 `HFSA_MODELS_DIR`，下次启动前执行 `unset HFSA_MODELS_DIR` 即可采用新默认；沿用原 Key 执行 `bash scripts/serve_hfsa_api.sh`。此次没有重启 API/Ollama/ngrok。只复制权重；环境和评测图片包仍按原路径提供，不将本目录称为含数据和环境的完整部署包。权重不提交到 GitHub 源码备份。下文旧外部路径说明仅作历史，以本节为准。
+
 ## 2026-10-12 视觉定位绝对方位软加分（当前状态）
 
 默认 detection bbox 匹配支持首个目标子句的明确中英文全图方位，例如“左下角的梯形草坪”或 `the lawn in the top-right corner of the image`。完整描述仍进入原 OpenCLIP/检测网络；只对原图候选框中心增加连续位置分，不删除候选或改检测置信度。相对参照、否定、冲突、方位属于旁边物体或无法明确解析时使用原匹配；这是有限规则解析，不是通用空间推理或中文目标理解能力。
@@ -67,19 +75,19 @@ Detection 候选 recall@0.5=66/80（82.5%），14条没有合格候选、4条有
 
 证据直接在 `runs/grounding/diagnostic_20261011/`：`paired80.json`、`public_data_audit.json`、`integrity.json`、测试/推理日志和8张公共overlay。后续区域候选/空间重排实验已按用户要求取消并回退；本轮仅完整训练和接入当前Q-Former VQA。正式 API 下次启动才加载本次坐标修复；服务状态以根目录CURRENT_STATE为准。
 
-## 当前 Q-Former VQA 接入与本机启动（2026-10-13）
+## 当前 Q-Former VQA 接入与本机启动（2026-10-14）
 
-当前已恢复合并队友代码前的五头 Q-Former v2，支持 category/color/shape/existence/scene；完整源码、原答案归一与模型包成套，head SHA256 为 `8f6ed01a42a22c7f82ff410ba4a5e6a8e56da79274b05d0eb4896408fc8cc706`。v3/v4 完整源码和权重已在工程外备份。位置、比较等未实现能力显式失败；不自动换模型。
+当前已成套切换十二头残差答案头 v4；新增类型 LayerNorm，head参数5,925,900。head SHA-256为 `2858c240b620915b9958ee3fa3f63f0bc01bc5c0c151b75f247852c2f551bf8b`。仍使用冻结YOLO/OpenCLIP及同一Q-Former融合核心；原五头和v3作为备份，不自动回退。
 
 `MODEL_MODE=real` 的 `vqa` 分支当前默认引用 `runs/vqa/qformer/weights/vqa_head.pt`，只接受架构 `hfsa_frozen_qformer_vqa_v2`、融合 `blip2_qformer` 的正式产物。独立 `tasks.vqa.inference.VQAPredictor` 接收图片、完整原题和原选项，构造一次后连续复用。`classification` 继续使用原21类场景分类。本节覆盖下文历史 VQA 拒绝或复用分类的记录。
 
-正式配置使用清洗后的85804条训练QA与37392条验证QA，seed42、batch128、最多15 epochs、patience4。冻结 YOLOv12m/CLIP，只训练新增 Q-Former Head 的2,864,405个参数；32 queries、2层、4头、192维。BLIP-2/LAVIS 核心来源与能力边界见 [VQA 模块说明](../tasks/vqa/README_INTEGRATION.txt)，没有导入其预训练 Q-Former/BERT/LLM 权重。
+v4训练配置和完整验证收据由bundle manifest绑定，seed42、batch128、最多15 epochs、patience4。冻结 YOLOv12m/CLIP，任务侧 Head 为5,925,900个参数；32 queries、2层、4头、192维。BLIP-2/LAVIS 核心来源与能力边界见 [VQA 模块说明](../tasks/vqa/README_INTEGRATION.txt)，没有导入其预训练 Q-Former/BERT/LLM 权重。
 
 启动门禁要求 `manifest.evaluation_status="complete"`，以及经过 manifest SHA-256 校验的 `training_result.json`、`config/train.json` 和 `evaluation/metrics.json`。训练必须 `validation_scope="full_split"`，训练/验证 batch 限制均为0，config 融合为 `blip2_qformer`，epoch 与 best_epoch 为有效整数；验证数量与 metrics.n 一致。checkpoint/dataset 哈希须为非空64位小写十六进制且与全量评估绑定；五类宏平均须有限、与训练选模结果一致。未完成、有限 batch、旧架构或收据不一致的目录在模型构造前拒绝。
 
-VQA 支持 category/color/shape/existence/scene 五类有限词表；short_text 返回模型答案，single_choice 返回原选项键，enum 返回原允许值。只将 constraint.values 声明的单选项传给模型；部分词表外候选仍允许比较已训练且可唯一映射的候选，未知候选不能选中，本地结果记录 choice_coverage。全部候选未知、已知别名重复、枚举含未知值、中文问题及未实现的计数/位置/比较/双图等明确失败。原题逐字传入，无目标提取、翻译或限定词删除；无 ROI、切片或定位证据，不代表完整官网问答能力。
+VQA具有category/color/shape/existence/scene/quantity/position/direction/relation/comparison/size/other十二类有限词表，具体类型以配套config.SUPPORTED为准；支持类型不等于空间或计数正确。short_text返回模型答案，single_choice返回原选项键，enum返回原允许值。原题和选项完整保留；词表无法匹配、语言或答案约束不支持时仍显式失败，不猜默认选项。任务路由中的计数、分类、有无与bbox继续由各自执行器负责；无ROI/切片或显式定位监督。
 
-`HFSA_VQA_BUNDLE_DIR` 默认工程内 `runs/vqa/qformer`；`HFSA_VQA_DEVICE` 默认 `cpu`，原任务设备由 `HFSA_API_DEVICE` 控制。VQA 使用同级 HFSA_models 内 `pretrain_model/yolov12m.pt` 和 `openclip/ViT-L-14.pt`，启动严格核对配置、词表、state_dict、模型和外部资产哈希。
+`HFSA_VQA_BUNDLE_DIR` 默认工程内 `runs/vqa/qformer`；`HFSA_VQA_DEVICE` 默认 `cpu`，原任务设备由 `HFSA_API_DEVICE` 控制。VQA 使用权重根目录（默认工程自身）内 `pretrain_model/yolov12m.pt` 和 `openclip/ViT-L-14.pt`，启动严格核对配置、词表、state_dict、模型和外部资产哈希。
 
 本轮正式15轮训练完成、最佳14，全部37392 QA复评通过并封包complete：五类宏平均53.730459%、五类22413 QA总体56.837550%、全QA35.643988%、有效返回58.039153%。同分母旧模型宏平均54.378791%、全QA36.379439%，公开val未提升；该val用于选模，不是独立test或官网成绩。用户已于2026-10-11 18:48重启当前工程API，PID399620监听9001；18:57用户官网smoke的6次HTTP200确认本次认证/公网连通和预测工作，当前入口仅接完整验证的Q-Former v2。部署/小样本分数解释见根目录CURRENT_STATE，原验收报告为训练验收时快照；无独立内存SHA接口，助手未读取进程Key或终端输出。
 
@@ -130,7 +138,7 @@ python -B scripts/verify_vqa_api.py \
 
 第一项核验当前权重的在线/缓存样本一致性、三种格式和冻结状态，完整准确率由37392条全量评估另行报告。第二项只读取 `runs/vqa/stage1/examples` 的既有公共图片和问题，当前模型直接输出作为 HTTP 一致性参考；不读取旧 expected_predictions 或金标。固定 VQA 任务组走真实 adapter 执行路径，真实 Qwen 组另验任务路由，路由到非 VQA 的样例记录为 skipped。临时服务只监听随机本机端口、使用随机测试认证值、关闭请求捕获；检查五类输出、三种格式、鉴权、图片哈希、不支持和双图拒绝、对象复用及冻结状态，不改变9001服务、不登记官网。`--skip-live-qwen` 会明确注明省略真实路由组，不能据此宣称完成路由验收。
 
-验收已完成：CPU在线/缓存7组一致；固定任务真实权重HTTP21组（16成功/5预期失败）；未patch Qwen HTTP11组（7成功/4预期失败，另10非VQA路由skip）。三形式、五头输出、鉴权、坏哈希、双图、不支持、冻结与复用等13项检查全部通过、errors为空。177项完整API回归、22项VQA测试和15项封包测试通过。正式权重SHA256 `8f6ed01a42a22c7f82ff410ba4a5e6a8e56da79274b05d0eb4896408fc8cc706`；报告在 `runs/vqa/qformer/reports/` 与 `evaluation/`。接口一致性不代表模型准确率或官网分数。
+历史五头版验收（以下SHA/报告路径不代表本次v4）：CPU在线/缓存7组一致；固定任务真实权重HTTP21组（16成功/5预期失败）；未patch Qwen HTTP11组（7成功/4预期失败，另10非VQA路由skip）。三形式、五头输出、鉴权、坏哈希、双图、不支持、冻结与复用等13项检查全部通过、errors为空。177项完整API回归、22项VQA测试和15项封包测试通过。正式权重SHA256 `8f6ed01a42a22c7f82ff410ba4a5e6a8e56da79274b05d0eb4896408fc8cc706`；报告在 `runs/vqa/qformer/reports/` 与 `evaluation/`。接口一致性不代表模型准确率或官网分数。
 
 ## HFSA 原生任务接入
 
@@ -141,7 +149,7 @@ Ollama 仍只选 `task`。Adapter 将 `question` 原字符串传到 native task�
 | 任务 | 当前原生流程 |
 | --- | --- |
 | 场景分类 | 原 Network + strict Head；checkpoint 类序、RGB/640 eval transform、softmax |
-| 单图 VQA 回答 | 正式 Q-Former v2 独立VQA，完整问题参与融合；五类答案头，保留原单选键/枚举值 |
+| 单图 VQA 回答 | 正式 Q-Former v2 独立VQA，完整问题参与融合；十二类答案头，保留原单选键/枚举值 |
 | 检测定位 | 原 PyTorch backend；小图沿用800，大图长边按32对齐且最多1600，ceil resize、单图 rect/pad=.5/stride 补边、RGB/255；conf=.25/NMS=.7/max_det300；描述匹配 temperature=.7；原图 xyxy |
 | 有无判断 | 同检测候选流程，不做单框匹配；NMS 框是否为空映射 Yes/No |
 | 类别计数 | 原 ObjectCounter、类别遥感模板、800 方形 letterbox、.15/.5/300；NMS 后框数 |
@@ -239,7 +247,7 @@ python3 check_api.py --origin http://127.0.0.1:9001 --package /path/to/dev-image
 curl -fsS -H "Authorization: Bearer $MODEL_API_KEY" http://127.0.0.1:9001/healthz
 ```
 
-预期至少包含 `{"status":"ready","protocol_version":"2.0","dataset_id":"rsu-dev100-v2"}`。若 `dataset_id` 不符，检查是否指向了错误的图片包。如果 `/healthz` 或 `check_api.py` 返回 401，先确认检查终端使用的是**服务启动时**的密钥。服务在启动时读取 `MODEL_API_KEY`；之后只在某个终端修改或重新生成密钥，不会更新已运行的服务。更换密钥时，重启服务，并在检查终端和网站填写同一新密钥。
+正式目录预期至少包含 `{"status":"ready","protocol_version":"2.0","dataset_id":"rsu-formal800-v3"}`。若 `dataset_id` 不符，检查是否指向了错误的图片包。如果 `/healthz` 或 `check_api.py` 返回 401，先确认检查终端使用的是**服务启动时**的密钥。服务在启动时读取 `MODEL_API_KEY`；之后只在某个终端修改或重新生成密钥，不会更新已运行的服务。更换密钥时，重启服务，并在检查终端和网站填写同一新密钥。
 
 `check_api.py` 成功只证明一次合成题走通，演示模型也能通过。若要评测真实 Qwen，确认启动服务前设置了 `MODEL_MODE=qwen` 和 `QWEN_MODEL_DIR`，且启动日志没有 `demo mode` 警告。脚本在本地 HTTP 检查成功时也会打印 `HTTPS/API handshake`；这条固定提示不代表公网 HTTPS 已验证。
 
@@ -539,3 +547,40 @@ presence调用检测、counting调用计数、grounding调用配置指定的dete
 原question传递、原模型/共享编码器/阈值/其它任务不变。默认工厂为spatial_reference；native可显式用于对照。bash scripts/serve_hfsa_api.sh迁移旧clip_guarded环境，原Key终端重启后生效。安全诊断仅固定枚举及计数，不记录题干/框/答案。
 
 完整API253测试通过，但公开对照115/80组正确数从native62/62降到58/60；没有证明整体改善，真实带方位多ABC未覆盖。规则解析仍可能unsupported并回旧流程；当前定位尚未解决，不以HTTP200或机制测试宣称准确率提升。
+
+### 2026-10-13 定位任务内的结构化文本解析
+
+`spatial_reference` 工厂现在复用本地 `qwen3:1.7b` 提取目标、全图方位、多个方向参照、容器内方位和图像边缘约束。任务路由的 JSON 仍只有 `task`；原 question 保留到任务边界。句子按编号提供，不按逗号拆开空间词与对象；目标/参照描述核对原文，冠词差异取回原文冠词。属性、数量或对象遗漏、方位证据冲突、目标自身/图像被当作容器时拒绝该计划。
+
+通过校验后才调用原检测和 phrase-map/Hungarian 匹配。支持四边及多个参照物；明确的 `Above it is X` / `It is left of X` 句法直接按原文确定关系及方向反转，不采用小模型相反的角色标签。既有中文明确方位前缀保留。容器内位置相对实际容器框计算，参考自身明确全图位置优先。图像边缘不作为检测对象，目前只限定原有粗方位范围，不验证框精确贴边。解析失败、参照未找到或搜索范围冲突时仍回原完整描述的全图 native；无空间条件的普通查询直接 native。
+
+复用 `HFSA_ROUTER_URL/MODEL/TIMEOUT`，仅允许本地 loopback；没有新模型、CLIP 图像裁块重排或检测阈值变化。诊断新增固定 `grounding_parser`、解析失败原因及容器计数，不记录提取文本。来源与属性校验是守卫，不是对所有指代关系的正确性证明。
+
+文本解析在 Qwen 提取后，按原句中的明确方向谓语绑定完整关系分句并补全漏项，以原句编号确定来源。只在出现另一个完整方向或目标图像边缘谓语时分句，不按所有逗号或 `and` 切分。使用已有 `spaCy/en_core_web_sm` 依存分析拆顶层名词并列；颜色并列、`with/lined with` 和从句修饰保留在所属参照物的原文描述中。首次需要拆并列时在 CPU 加载本地英文依存模型，之后进程内缓存，不下载模型。
+
+补全前只恢复两类有原文证据的抽取错误。参照 `source_id` 仍须为合法范围内整数；只有原绑定句找不到完整短语、全文只出现一次且明确属于目标邻居谓语时，才更正编号，不把目标、属性或容器当参照，不按方位猜来源。容器只有与目标同源、字面唯一指向目标身份的同一名词中心，且两层位置都完全复制有效目标图像位置时才作为重复自身删除；真实容器与局部位置保留。纠正后继续原完整校验，改写、遗漏属性、伪容器、否定与歧义仍可能拒绝并回原整句 native。Qwen 的模型、提示、schema、采样配置及视觉策略均保持。
+
+每个明确关系分句按来源、方向及完整短语出现次数校验，重复颜色/对象在其它方向出现不再掩盖该方向的遗漏。图像边缘必须有目标归属和对应边证据；`while the target...` 或明确边界谓语可独立识别，`while it...` 的归属歧义仍拒绝。补全不清除否定、`unresolved` 或非法位置；无法证明完整性时仍回原完整描述 native。解析条件完整不代表视觉框正确或评分提高。
+
+已完成 API 253 项回归、新诊断 11 项及检测 155 项验证。历史 26 条去重描述的本机 Qwen 实测仍有大量拒绝；四边参照描述已有完整提取，不能据此声称官网 IoU 或分数提高。API 需在原 Key 终端 Ctrl+C 后运行 `bash scripts/serve_hfsa_api.sh` 才读取新代码；本次没有重启服务或提交官网评测。
+
+### 本次测评专用：直接输出参照框外接坐标
+
+仅为本次测评显式设置 `HFSA_GROUNDING_POLICY=reference_enclosure`。默认 `spatial_reference` 和通用定位规则保持原行为。该模式复用同一文本解析、方位参照查询及原图 phrase-map/Hungarian 选框；全部实体参照成功后直接返回 `[min(x1), min(y1), max(x2), max(y2)]`，不求关系半平面交集、不裁图、不检测目标。容器框和图像边缘不作为外接框成员。使用独立坐标结果，没有虚构目标检测分数或短语匹配索引；API 检查原图尺寸和框有效性，左上向下、右下向上取整。
+
+解析失败、无实体参照或任一参照不可用时，保留原完整描述的全图 native 回退，不输出部分参照的外接框。安全诊断用 `enclosure_selected` / `grounding_reference_enclosed` 区分直接输出，成功路径 `grounding_roi_count=0`。外接框不能证明参照识别正确，也不保证测评分数提高；不影响 presence、计数、VQA 或 RefSeg。
+
+解析成功后逐个尝试全部实体参照；某个参照无候选、匹配失败或发生异常时，记录该项结果并继续后续参照，全部结束后才判断是否可以输出。容器失败仍阻止并集输出，但不跳过其余参照的观察。仅全部参照及既有容器条件成功时直接返回原并集外接矩形；否则仍执行一次原整句 native 回退，不返回部分参照框。模型、阈值、位置过滤、文本解析和匹配算法保持原样。
+
+执行器的 `grounding_reference_results` 按解析顺序保存检测描述、实际查询、候选数、已有原始最高置信度及实际所选框；最高置信度在底层诊断未启用或检测异常时为 `null`，不能以候选分数冒充未记录的原始置信度。状态区分 `selected`、`no_candidates`、`match_failed`、`error`，异常只记录固定阶段，不保存异常文本。私有观察重放可读取完整明细并标图；生产安全诊断仅复制参照序号、固定状态/阶段及数字，不持久保存描述或框坐标，官方 API 答案契约不变。
+
+在原 API Key 所在的 WSL 终端启用本次测评模式：
+
+```bash
+HFSA_GROUNDING_POLICY=reference_enclosure bash scripts/serve_hfsa_api.sh
+```
+
+完成测评后以 `HFSA_GROUNDING_POLICY=spatial_reference bash scripts/serve_hfsa_api.sh` 启动即可恢复默认策略。上述命令不改持久配置；已经运行的 API 须由原终端重启后才读取新源码和策略。
+
+
+2026-10-14 冻结说明：`scripts/serve_hfsa_api.sh`默认正式图片根目录，`HFSA_API_PACKAGE_DIR`可覆盖。正式根目录含manifest和assets，dataset_id=rsu-formal800-v3，资产1000项；800是题数，不是manifest资产数。最终部署使用detection/spatial_reference、VQA CPU、本地Qwen3:1.7b，其余任务与路由保留本次切换前磁盘实现。旧开发53题三版真实HTTP比较：全部确定42题语义正确均14，v3/v4有效36/53、旧版31/53；v4本次耗时较短故选用。严格字符串与语义等价差异及局限见提交目录VQA版本对比.txt。密钥只经运行环境或标准输入传入。

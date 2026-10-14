@@ -608,11 +608,51 @@ class BBoxPolicyAdapterTests(unittest.TestCase):
         for fields in (
             {"grounding_policy": "unknown"},
             {"grounding_policy": "spatial_reference"},
+            {"grounding_policy": "reference_enclosure"},
             {"grounding_policy": "native", "grounding_executor": Mock()},
             {"grounding_backend": "refseg", "grounding_policy": "spatial_reference", "grounding_executor": Mock()},
+            {"grounding_backend": "refseg", "grounding_policy": "reference_enclosure", "grounding_executor": Mock()},
         ):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 HFSAAdapter(self.classification, self.detection, self.counting, self.refseg, **fields)
+
+    def test_evaluation_enclosure_uses_direct_bbox_contract_and_presence_stays_native(self):
+        from tasks.detection.spatial_reference_grounding import ReferenceEnclosureResult
+
+        executor = Mock()
+        executor.predict.return_value = ReferenceEnclosureResult((1.2, 2.8, 70.1, 35.2), (40, 80))
+        self.adapter = HFSAAdapter(self.classification, self.detection, self.counting, self.refseg,
+                                   grounding_policy="reference_enclosure", grounding_executor=executor)
+        self.select("visual_grounding")
+        self.assertEqual(self.predict(request("source", "bbox", image_height=40, image_width=80)),
+                         [1, 2, 71, 36])
+        executor.predict.assert_called_once_with(self.image, "source")
+        self.detection.predict.assert_not_called()
+        self.select("presence")
+        self.assertEqual(self.predict(request("source", "enum", constraint={"values": ["Yes", "No"]})), "Yes")
+        self.detection.predict.assert_called_once_with(self.image, "source", require_grounding=False)
+        self.assertEqual(executor.predict.call_count, 1)
+
+    def test_evaluation_enclosure_validates_shape_finiteness_area_bounds_and_size(self):
+        from tasks.detection.spatial_reference_grounding import ReferenceEnclosureResult
+
+        for box in ((1, 2, 3), (1, 2, np.nan, 4), (1, 2, np.inf, 4),
+                    (3, 2, 1, 4), (1, 2, 1, 4), (-1, 2, 3, 4), (1, 2, 81, 4), (1, 2, 3, 41)):
+            with self.subTest(box=box), self.assertRaises(AdapterFailure) as raised:
+                HFSAAdapter._reference_enclosure_box(ReferenceEnclosureResult(box, (40, 80)), 40, 80)
+            self.assertEqual(raised.exception.code, "invalid_reference_enclosure")
+        with self.assertRaises(AdapterFailure) as raised:
+            HFSAAdapter._reference_enclosure_box(ReferenceEnclosureResult((1, 2, 3, 4), (80, 40)), 40, 80)
+        self.assertEqual(raised.exception.code, "image_dimensions_mismatch")
+
+    def test_evaluation_failure_result_still_uses_validated_native_bbox(self):
+        executor = Mock()
+        executor.predict.return_value = self.detection.predict.return_value
+        self.adapter = HFSAAdapter(self.classification, self.detection, self.counting, self.refseg,
+                                   grounding_policy="reference_enclosure", grounding_executor=executor)
+        self.select("visual_grounding")
+        self.assertEqual(self.predict(request("source", "bbox", image_height=40, image_width=80)),
+                         [30, 20, 71, 36])
 
     def test_guarded_diagnostic_emits_only_fixed_values_and_numeric_allowlist(self):
         executor = self.guarded()
@@ -879,7 +919,7 @@ class LoadingBoundaryTests(unittest.TestCase):
                 raise AssertionError("Native factories must not import a Web Predictor")
             return real_import(name, *args, **kwargs)
 
-        with patch.dict(os.environ, {"HFSA_MODELS_DIR": "/synthetic/models", "HFSA_API_DEVICE": "cpu"}, clear=True):
+        with patch.dict(os.environ, {"HFSA_API_DEVICE": "cpu"}, clear=True):
             with patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready") as ready, \
                     patch("hfsa_adapter.validate_api_vqa_bundle"):
                 with patch("hfsa_adapter.Path.is_file", autospec=True, return_value=True) as is_file:
@@ -901,7 +941,11 @@ class LoadingBoundaryTests(unittest.TestCase):
         self.assertEqual(factories["vqa"].call_args.kwargs["bundle_dir"].name, "qformer")
         self.assertEqual(factories["vqa"].call_args.kwargs["device"], "cpu")
         self.assertEqual(set(factories["vqa"].call_args.kwargs["asset_paths"]), {"visual_backbone", "text_encoder"})
-        factories["encoder"].assert_called_once_with(device="cpu")
+        code_dir = Path(__file__).resolve().parents[2]
+        factories["encoder"].assert_called_once_with(
+            device="cpu", pretrained=str(code_dir / "openclip/ViT-L-14.pt"))
+        for name in ("classification", "detection", "counting"):
+            self.assertTrue(factories[name].call_args.kwargs["checkpoint"].is_relative_to(code_dir))
         self.assertIs(factories["detection"].call_args.kwargs["encoder"], factories["encoder"].return_value)
         self.assertEqual(factories["detection"].call_args.kwargs["max_image_size"], 1600)
         self.assertEqual(factories["detection"].call_args.kwargs["spatial_weight"], .15)
@@ -919,6 +963,9 @@ class LoadingBoundaryTests(unittest.TestCase):
                     adapter = HFSAAdapter.from_local()
         self.assertEqual(adapter.grounding_backend, "refseg")
         self.assertIs(adapter.refseg, factories["refseg"].return_value)
+        factories["encoder"].assert_called_once_with(
+            device="cpu", pretrained=str(Path("/synthetic/models/openclip/ViT-L-14.pt").resolve()))
+        self.assertTrue(callable(factories["refseg"].call_args.kwargs["text_encoder_factory"]))
         ready.assert_called_once_with()
         factories["refseg"].assert_called_once()
         self.assertTrue(any(call.args[0].name == "best_raw.pt" for call in is_file.call_args_list))
@@ -939,7 +986,6 @@ class LoadingBoundaryTests(unittest.TestCase):
                         HFSAAdapter.from_local()
                 ready.assert_not_called()
                 is_file.assert_not_called()
-
 
     def test_zero_spatial_weight_is_forwarded_to_native_detection(self):
         modules, factories = self.fake_grounding_modules()
@@ -982,16 +1028,35 @@ class LoadingBoundaryTests(unittest.TestCase):
         factories["grounding"].assert_called_once_with(
             detection,
             description_extractor=detection_text, image_converter=detection._image,
+            plan_parser=factories["grounding"].call_args.kwargs["plan_parser"],
         )
+        parser = factories["grounding"].call_args.kwargs["plan_parser"]
+        self.assertEqual(parser.name, "qwen")
+        self.assertTrue(callable(parser))
         self.assertEqual(factories["detection"].call_args.kwargs["candidate_confidence"], .25)
         self.assertEqual(adapter.grounding_policy, "spatial_reference")
         self.assertIs(adapter.grounding_executor, factories["grounding"].return_value)
         self.assertEqual(adapter.grounding_backend, "detection")
 
+    def test_evaluation_policy_is_explicit_and_enables_direct_reference_enclosure(self):
+        modules, factories = self.fake_grounding_modules()
+        with patch.dict(os.environ, {"HFSA_GROUNDING_POLICY": "reference_enclosure"}, clear=True), \
+                patch.dict(sys.modules, modules), patch("hfsa_adapter.ensure_router_ready"), \
+                patch("hfsa_adapter.validate_api_vqa_bundle"), patch("hfsa_adapter.Path.is_file", return_value=True), \
+                redirect_stdout(io.StringIO()):
+            adapter = HFSAAdapter.from_local()
+        self.assertEqual(adapter.grounding_policy, "reference_enclosure")
+        self.assertEqual(adapter.grounding_backend, "detection")
+        self.assertTrue(factories["grounding"].call_args.kwargs["enclose_references"])
+        self.assertIs(factories["grounding"].call_args.args[0], factories["detection"].return_value)
+        self.assertIs(adapter.grounding_executor, factories["grounding"].return_value)
+        factories["refseg"].assert_not_called()
+
     def test_invalid_policy_and_guarded_configuration_fail_before_router_or_weights(self):
         configurations = [{"HFSA_GROUNDING_POLICY": value} for value in ("", "clip", "clip_guarded", "unknown")]
         configurations += [
             {"HFSA_GROUNDING_POLICY": "spatial_reference", "HFSA_GROUNDING_BACKEND": "refseg"},
+            {"HFSA_GROUNDING_POLICY": "reference_enclosure", "HFSA_GROUNDING_BACKEND": "refseg"},
         ]
         for configuration in configurations:
             with self.subTest(configuration=configuration), patch.dict(os.environ, configuration, clear=True), \

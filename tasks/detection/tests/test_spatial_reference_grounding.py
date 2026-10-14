@@ -1,12 +1,16 @@
 """Geometry and source-text tests for the requested ABC-before-target path."""
 from dataclasses import dataclass, replace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
 from tasks.detection.spatial_reference_grounding import (
     SpatialReferenceGroundingExecutor, parse_spatial_reference_plan, positioned_reference,
+    ReferenceEnclosureResult,
+)
+from tasks.detection.structured_spatial_parser import (
+    ContainerSpec, PositionedReferenceSpec, SpatialReferencePlan, SpatialParseError,
 )
 
 
@@ -125,7 +129,7 @@ class SpatialReferenceTests(unittest.TestCase):
 
     def test_missing_reference_and_conflicting_geometry_fall_back_without_roi(self):
         for values, reason in (
-            ([result([])], "grounding_reference_unavailable"),
+            ([result([]), result([[10, 40, 20, 60]])], "grounding_reference_unavailable"),
             ([result([[80, 40, 100, 60]]), result([[10, 40, 20, 60]])], "grounding_conflicting_region"),
         ):
             with self.subTest(reason=reason):
@@ -165,6 +169,254 @@ class SpatialReferenceTests(unittest.TestCase):
         output = self.executor.predict(self.image, question)
         self.assertEqual(output.diagnostics["grounding_outcome"], "native_fallback")
         self.assertNotIn("lawn", str(output.diagnostics))
+
+
+class StructuredExecutorTests(unittest.TestCase):
+    setUp = SpatialReferenceTests.setUp
+
+    def use(self, plan):
+        self.parser = Mock(return_value=plan, name="parser")
+        self.parser.name = "qwen"
+        self.executor = SpatialReferenceGroundingExecutor(
+            self.native, description_extractor=lambda text: text, image_converter=lambda image: image,
+            plan_parser=self.parser,
+        )
+
+    def test_structured_explicit_reference_position_is_used_in_query_and_geometry(self):
+        spec = PositionedReferenceSpec("a white tower", "below", (1, -1), ("below",))
+        self.assertEqual(positioned_reference(spec, (-1, 1)),
+                         ("a white tower in the top-right corner of the image", (1, -1)))
+
+    def test_four_references_are_detected_before_target(self):
+        self.use(SpatialReferencePlan("a blue shed", (
+            PositionedReferenceSpec("a lane", "below"),
+            PositionedReferenceSpec("a yard", "right_of"),
+            PositionedReferenceSpec("a lawn", "above"),
+            PositionedReferenceSpec("two tanks", "left_of"),
+        ), (-1, 1)))
+        values = [result([[20, 35, 80, 45]]), result([[0, 50, 10, 80]]),
+                  result([[10, 85, 90, 95]]), result([[95, 50, 105, 80]])]
+        def predict(image, text, **kwargs):
+            if values:
+                return values.pop(0)
+            return result([[30, 30, 60, 50]], hw=image.shape[:2])
+        self.native.predict.side_effect = predict
+        output = self.executor.predict(self.image, "original question")
+        self.assertEqual([c.args[1] for c in self.native.predict.call_args_list],
+                         ["a lane in the bottom-left corner of the image",
+                          "a yard in the bottom-left corner of the image",
+                          "a lawn in the bottom-left corner of the image",
+                          "two tanks in the bottom-left corner of the image", "a blue shed"])
+        self.assertEqual(output.diagnostics["grounding_outcome"], "region_selected")
+        self.assertEqual(output.diagnostics["grounding_located_reference_count"], 4)
+
+    def test_container_local_upper_left_does_not_become_image_upper_left(self):
+        self.use(SpatialReferencePlan("the only yellow van, a black roof", (), None,
+                                     (ContainerSpec("a parking lot", (1, None), (-1, -1)),)))
+        def predict(image, text, **kwargs):
+            if text.startswith("a parking lot"):
+                return result([[110, 40, 190, 90]])
+            self.assertEqual(text, "the only yellow van, a black roof")
+            return result([[30, 20, 45, 30]], hw=image.shape[:2])
+        self.native.predict.side_effect = predict
+        output = self.executor.predict(self.image, "original question")
+        # ROI origin (90,30); container-local quadrant remains on image RIGHT.
+        np.testing.assert_array_equal(output.boxes, [[120, 50, 135, 60]])
+        self.assertEqual(output.diagnostics["grounding_outcome"], "region_selected")
+        self.assertEqual(output.diagnostics["grounding_located_container_count"], 1)
+        self.assertEqual(output.diagnostics["grounding_detector_call_count"], 2)
+
+    def test_frame_edge_is_not_queried_as_an_object(self):
+        self.use(SpatialReferencePlan("a red hut", (), (-1, None), frame_edges=("left",)))
+        self.native.predict.return_value = result([[10, 20, 30, 40]], hw=(100, 140))
+        output = self.executor.predict(self.image, "original question")
+        self.assertEqual(self.native.predict.call_args.args[1], "a red hut")
+        self.assertEqual(output.diagnostics["grounding_reference_count"], 0)
+        self.assertEqual(output.diagnostics["grounding_detector_call_count"], 1)
+        self.assertEqual(output.diagnostics["grounding_outcome"], "region_selected")
+
+    def test_parser_failure_uses_original_native_and_fixed_reason(self):
+        self.use(None)
+        self.parser.side_effect = SpatialParseError("grounding_parser_source_mismatch")
+        self.native.predict.return_value = result([[1, 2, 20, 30]])
+        output = self.executor.predict(self.image, "original question")
+        self.native.predict.assert_called_once_with(self.image, "original question")
+        self.assertEqual(output.diagnostics["grounding_parser"], "qwen")
+        self.assertEqual(output.diagnostics["grounding_reason"], "grounding_parser_source_mismatch")
+        self.assertEqual(output.diagnostics["grounding_roi_count"], 0)
+
+    def test_simple_query_is_parsed_and_goes_native(self):
+        self.use(SpatialReferencePlan("sheds", (), None))
+        self.native.predict.return_value = result([[1, 2, 20, 30]])
+        output = self.executor.predict(self.image, "sheds")
+        self.native.predict.assert_called_once_with(self.image, "sheds")
+        self.assertEqual(output.diagnostics["grounding_parse_status"], "parsed")
+        self.assertEqual(output.diagnostics["grounding_reason"], "grounding_no_spatial_constraints")
+
+
+class ReferenceEnclosureTests(unittest.TestCase):
+    setUp = SpatialReferenceTests.setUp
+
+    def use(self, references, **fields):
+        plan = SpatialReferencePlan("target identity", tuple(references), None, **fields)
+        self.executor = SpatialReferenceGroundingExecutor(
+            self.native, description_extractor=lambda text: text, image_converter=lambda image: image,
+            plan_parser=lambda text: plan, enclose_references=True,
+        )
+
+    def test_all_reference_extents_return_directly_without_roi_or_target_detection(self):
+        self.use([PositionedReferenceSpec("a lane", "below"),
+                  PositionedReferenceSpec("a yard", "right_of"),
+                  PositionedReferenceSpec("a lawn", "above"),
+                  PositionedReferenceSpec("two tanks", "left_of")])
+        self.native.predict.side_effect = [
+            result([[20.5, 5.2, 90, 20]]), result([[2.3, 30, 18, 70]]),
+            result([[30, 75, 80, 95.4]]), result([[100, 20, 150.8, 65]]),
+        ]
+        with patch("tasks.detection.spatial_reference_grounding._expanded_roi", side_effect=AssertionError), \
+                patch("tasks.detection.spatial_reference_grounding._relation_region", side_effect=AssertionError):
+            output = self.executor.predict(self.image, "original question")
+        self.assertIsInstance(output, ReferenceEnclosureResult)
+        np.testing.assert_allclose(output.bbox, [2.3, 5.2, 150.8, 95.4], atol=1e-5)
+        self.assertEqual(output.original_size, (100, 200))
+        self.assertFalse(hasattr(output, "scores"))
+        self.assertEqual([call.args[1] for call in self.native.predict.call_args_list],
+                         ["a lane", "a yard", "a lawn", "two tanks"])
+        for call in self.native.predict.call_args_list:
+            self.assertIs(call.args[0], self.image)
+            self.assertEqual(call.kwargs, {"return_phrase_scores": True})
+        self.assertEqual(output.diagnostics["grounding_policy"], "reference_enclosure")
+        self.assertEqual(output.diagnostics["grounding_outcome"], "enclosure_selected")
+        self.assertEqual(output.diagnostics["grounding_reason"], "grounding_reference_enclosed")
+        self.assertEqual(output.diagnostics["grounding_detector_call_count"], 4)
+        self.assertEqual(output.diagnostics["grounding_roi_count"], 0)
+        self.assertEqual(output.diagnostics["grounding_candidate_count"], 0)
+
+    def test_overlapping_opposing_references_do_not_collapse_to_center(self):
+        self.use([PositionedReferenceSpec("road", "below"), PositionedReferenceSpec("yard", "above")])
+        self.native.predict.side_effect = [result([[20, 30, 80, 90]]), result([[20.01, 29.99, 80.02, 90]])]
+        output = self.executor.predict(self.image, "original question")
+        np.testing.assert_allclose(output.bbox, [20, 29.99, 80.02, 90], atol=1e-5)
+        self.assertEqual(self.native.predict.call_count, 2)
+
+    def test_single_reference_keeps_full_extent(self):
+        self.use([PositionedReferenceSpec("road", "near")])
+        self.native.predict.return_value = result([[140, 60, 200, 100]])
+        output = self.executor.predict(self.image, "original question")
+        self.assertEqual(output.bbox, (140, 60, 200, 100))
+        self.native.predict.assert_called_once_with(self.image, "road", return_phrase_scores=True)
+
+    def test_missing_reference_falls_back_without_partial_enclosure_or_crop(self):
+        self.use([PositionedReferenceSpec("road", "below"), PositionedReferenceSpec("yard", "above")])
+        baseline = result([[40, 50, 60, 70]])
+        self.native.predict.side_effect = [result([[20, 30, 80, 90]]), result([]), baseline]
+        output = self.executor.predict(self.image, "original question")
+        self.assertNotIsInstance(output, ReferenceEnclosureResult)
+        np.testing.assert_array_equal(output.boxes, baseline.boxes)
+        self.native.predict.assert_called_with(self.image, "original question")
+        self.assertEqual(output.diagnostics["grounding_located_reference_count"], 1)
+        self.assertEqual(output.diagnostics["grounding_roi_count"], 0)
+        self.assertEqual(output.diagnostics["grounding_reason"], "grounding_reference_unavailable")
+
+    def test_all_references_attempted_after_empty_unmatched_and_detection_error(self):
+        self.use([PositionedReferenceSpec("road", "below"),
+                  PositionedReferenceSpec("yard", "above", (-1, -1)),
+                  PositionedReferenceSpec("trees", "near"),
+                  PositionedReferenceSpec("pond", "near")])
+        empty = replace(result([]), diagnostics={"max_confidence": .012})
+        unmatched = replace(result([[150, 80, 180, 95]]), diagnostics={"max_confidence": .9})
+        accepted = replace(result([[20, 30, 80, 90]]), diagnostics={"max_confidence": .8})
+        baseline = replace(result([[40, 50, 60, 70]]), diagnostics={"max_confidence": .99})
+        self.native.predict.side_effect = [empty, unmatched, RuntimeError("private-error-text"), accepted, baseline]
+        with patch("tasks.detection.spatial_reference_grounding._expanded_roi", side_effect=AssertionError):
+            output = self.executor.predict(self.image, "original question")
+        self.assertNotIsInstance(output, ReferenceEnclosureResult)
+        np.testing.assert_array_equal(output.boxes, baseline.boxes)
+        self.assertEqual([call.args[1] for call in self.native.predict.call_args_list],
+                         ["road", "yard in the top-left corner of the image", "trees", "pond", "original question"])
+        attempts = output.diagnostics["grounding_reference_results"]
+        self.assertEqual([attempt["reference_index"] for attempt in attempts], [1, 2, 3, 4])
+        self.assertEqual([attempt["status"] for attempt in attempts],
+                         ["no_candidates", "match_failed", "error", "selected"])
+        self.assertEqual([attempt["candidate_count"] for attempt in attempts], [0, 1, None, 1])
+        self.assertEqual([attempt["max_confidence"] for attempt in attempts], [.012, .9, None, .8])
+        self.assertEqual(attempts[2]["failure_stage"], "detection")
+        self.assertEqual(attempts[3]["selected_index"], 0)
+        self.assertEqual(attempts[3]["selected_bbox_original_xyxy"], [20, 30, 80, 90])
+        self.assertEqual(attempts[0]["query"], "road")
+        self.assertIsNone(attempts[0]["selected_bbox_original_xyxy"])
+        self.assertNotIn("private-error-text", str(output.diagnostics))
+        self.assertEqual(output.diagnostics["grounding_located_reference_count"], 1)
+        self.assertEqual(output.diagnostics["grounding_detector_call_count"], 5)
+        self.assertEqual(output.diagnostics["grounding_reason"], "grounding_reference_unavailable")
+        self.assertEqual(output.diagnostics["grounding_roi_count"], 0)
+
+    def test_candidate_and_matcher_exceptions_do_not_skip_later_references(self):
+        for invalid, phase in (
+            (replace(result([[20, 30, 80, 90]]), original_size=(90, 200)), "candidates"),
+            (replace(result([[20, 30, 80, 90]]), baseline_adjusted_scores=np.array([np.nan])), "matching"),
+        ):
+            with self.subTest(phase=phase):
+                self.native.reset_mock()
+                self.use([PositionedReferenceSpec("road", "below"), PositionedReferenceSpec("yard", "above")])
+                baseline = result([[40, 50, 60, 70]])
+                self.native.predict.side_effect = [invalid, result([[20, 30, 80, 90]]), baseline]
+                output = self.executor.predict(self.image, "original question")
+                attempts = output.diagnostics["grounding_reference_results"]
+                self.assertEqual([attempt["status"] for attempt in attempts], ["error", "selected"])
+                self.assertEqual(attempts[0]["failure_stage"], phase)
+                self.assertEqual(self.native.predict.call_count, 3)
+                np.testing.assert_array_equal(output.boxes, baseline.boxes)
+
+    def test_failed_container_still_observes_all_references_and_preserves_fallback(self):
+        for unavailable in (result([]), RuntimeError("private-container-error")):
+            with self.subTest(unavailable=type(unavailable).__name__):
+                self.native.reset_mock()
+                self.use([PositionedReferenceSpec("road", "below"), PositionedReferenceSpec("yard", "above")],
+                         containers=(ContainerSpec("a park", None, (-1, -1)),))
+                baseline = result([[40, 50, 60, 70]])
+                self.native.predict.side_effect = [unavailable, result([[10, 20, 30, 40]]),
+                                                   result([[40, 50, 80, 90]]), baseline]
+                output = self.executor.predict(self.image, "original question")
+                self.assertEqual(output.diagnostics["grounding_located_reference_count"], 2)
+                self.assertEqual(output.diagnostics["grounding_detector_call_count"], 4)
+                self.assertEqual(output.diagnostics["grounding_reason"], "grounding_container_unavailable")
+                self.assertNotIsInstance(output, ReferenceEnclosureResult)
+                np.testing.assert_array_equal(output.boxes, baseline.boxes)
+
+    def test_final_original_description_fallback_error_still_propagates(self):
+        self.use([PositionedReferenceSpec("road", "below"), PositionedReferenceSpec("yard", "above")])
+        failure = RuntimeError("fallback error")
+        self.native.predict.side_effect = [result([]), result([[20, 30, 80, 90]]), failure]
+        with self.assertRaises(RuntimeError) as caught:
+            self.executor.predict(self.image, "original question")
+        self.assertIs(caught.exception, failure)
+        self.native.predict.assert_called_with(self.image, "original question")
+        self.assertEqual(self.native.predict.call_count, 3)
+
+    def test_no_entities_does_not_enclose_container_or_frame_or_crop_target(self):
+        for fields in ({}, {"frame_edges": ("left",)},
+                       {"containers": (ContainerSpec("a parking lot", None, (-1, -1)),)}):
+            with self.subTest(fields=fields):
+                self.native.reset_mock()
+                self.use([], **fields)
+                self.native.predict.return_value = result([[40, 50, 60, 70]])
+                output = self.executor.predict(self.image, "original question")
+                self.native.predict.assert_called_once_with(self.image, "original question")
+                self.assertEqual(output.diagnostics["grounding_reason"], "grounding_no_references")
+                self.assertEqual(output.diagnostics["grounding_roi_count"], 0)
+
+    def test_parser_rejection_preserves_original_native_fallback(self):
+        parser = Mock(side_effect=SpatialParseError("grounding_parser_unresolved"))
+        self.executor = SpatialReferenceGroundingExecutor(
+            self.native, description_extractor=lambda text: text, image_converter=lambda image: image,
+            plan_parser=parser, enclose_references=True,
+        )
+        self.native.predict.return_value = result([[40, 50, 60, 70]])
+        output = self.executor.predict(self.image, "original question")
+        self.native.predict.assert_called_once_with(self.image, "original question")
+        self.assertEqual(output.diagnostics["grounding_reason"], "grounding_parser_unresolved")
+        self.assertEqual(output.diagnostics["grounding_policy"], "reference_enclosure")
 
 
 if __name__ == "__main__":
